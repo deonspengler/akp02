@@ -59,14 +59,14 @@ dev = [
 packages = ["akp02"]
 
 [tool.hatch.build.targets.sdist]
-include = ["akp02", "test_akp02.py", "README.md", "udev"]
+include = ["akp02", "tests", "README.md", "udev"]
 
 
 # ---------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["test_akp02.py"]
+testpaths = ["tests"]
 addopts = "--strict-markers"
 # Hang detector, not a performance budget: no test should take anywhere
 # near this long (the whole suite runs in ~1s). If one does, this dumps
@@ -118,7 +118,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"test_akp02.py" = [
+"tests/test_akp02.py" = [
     # Fake devices intentionally implement only the slice of the
     # _HidDevice protocol each test needs, and reach into private
     # attributes to assert on internal state.
@@ -135,7 +135,7 @@ ignore = [
 # accidental use of newer-than-3.11 syntax or APIs even when mypy itself
 # runs on a later interpreter.
 python_version = "3.11"
-files = ["akp02", "test_akp02.py"]
+files = ["akp02", "tests"]
 strict = true
 warn_unreachable = true
 
