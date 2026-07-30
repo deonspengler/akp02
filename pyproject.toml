@@ -9,48 +9,51 @@ description = "Linux library for the Ajazz AKP02 9.2\" 1920x462 USB HID display"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MPL-2.0"
+# PEP 639. Explicit rather than relying on hatchling's default LICENSE*
+# glob: MPL-2.0 requires the license text to travel with the source, and
+# an explicit list means a rename can't silently drop it from the sdist.
+license-files = ["LICENSE"]
 authors = [{ name = "Deon Spengler", email = "deon@spengler.co.za" }]
 keywords = ["ajazz", "akp02", "hid", "usb", "display", "panel", "linux"]
-
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Topic :: System :: Hardware :: Hardware Drivers",
-    "Topic :: Multimedia :: Graphics",
-    "Typing :: Typed",
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: System :: Hardware :: Hardware Drivers",
+  "Topic :: Multimedia :: Graphics",
+  "Typing :: Typed",
 ]
-
 dependencies = [
-    # Image.Resampling / Image.Transpose enums (used in _letterbox and
-    # show) landed in Pillow 9.1.
-    "pillow>=9.1",
-    # MUST be `hidapi`, not the unrelated `hid` package -- both import as
-    # `hid` and only this one provides hid.device. AKP02._open detects the
-    # mix-up and says so, but pinning it here is what stops it happening.
-    "hidapi>=0.14",
+  # Image.Resampling / Image.Transpose enums (used in _letterbox and
+  # show) landed in Pillow 9.1.
+  "pillow>=9.1",
+  # MUST be `hidapi`, not the unrelated `hid` package -- both import as
+  # `hid` and only this one provides hid.device. AKP02._open detects the
+  # mix-up and says so, but pinning it here is what stops it happening.
+  "hidapi>=0.14",
 ]
 
 [project.urls]
 Homepage = "https://github.com/deonspengler/akp02"
 Issues = "https://github.com/deonspengler/akp02/issues"
+Changelog = "https://github.com/deonspengler/akp02/releases"
 
 [project.optional-dependencies]
 test = [
-    "pytest>=7.0",
-    # The suite is written to be order-independent; this keeps it honest.
-    # Nothing in the config depends on it -- the suite runs fine without.
-    "pytest-randomly>=3.12",
+  "pytest>=7.0",
+  # The suite is written to be order-independent; this keeps it honest.
+  # Nothing in the config depends on it -- the suite runs fine without.
+  "pytest-randomly>=3.12",
 ]
 dev = [
-    "akp02[test]",
-    "mypy>=1.8",
-    "ruff>=0.5",
+  "akp02[test]",
+  "mypy>=1.8",
+  "ruff>=0.5",
 ]
 
 # Flat layout: akp02/ sits next to this file. For a src/ layout instead,
@@ -58,9 +61,13 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["akp02"]
 
-[tool.hatch.build.targets.sdist]
-include = ["akp02", "tests", "README.md", "udev"]
+# The udev rule is shipped inside the package as well as in the sdist, so
+# a `pip install akp02` user can locate it without a repo checkout.
+[tool.hatch.build.targets.wheel.force-include]
+"udev/99-akp02.rules" = "akp02/udev/99-akp02.rules"
 
+[tool.hatch.build.targets.sdist]
+include = ["akp02", "tests", "README.md", "LICENSE", "udev"]
 
 # ---------------------------------------------------------------------
 # pytest
@@ -80,18 +87,17 @@ addopts = "--strict-markers"
 # where the plugin would kill the test outright.
 faulthandler_timeout = 60
 filterwarnings = [
-    # The library warns on abandoned keepalive threads and leaked HID
-    # handles. Tests that expect those capture them explicitly, so
-    # anything reaching here is an unexpected warning worth failing on.
-    "error",
-    # Keep pytest's own config warnings as warnings. They are issued
-    # before the test run starts, and pytest turns a config-time
-    # error into an INTERNALERROR with no readable message -- so a
-    # simple typo in a setting above would crash the run instead of
-    # explaining itself.
-    "default::pytest.PytestConfigWarning",
+  # The library warns on abandoned keepalive threads and leaked HID
+  # handles. Tests that expect those capture them explicitly, so
+  # anything reaching here is an unexpected warning worth failing on.
+  "error",
+  # Keep pytest's own config warnings as warnings. They are issued
+  # before the test run starts, and pytest turns a config-time
+  # error into an INTERNALERROR with no readable message -- so a
+  # simple typo in a setting above would crash the run instead of
+  # explaining itself.
+  "default::pytest.PytestConfigWarning",
 ]
-
 
 # ---------------------------------------------------------------------
 # ruff
@@ -102,29 +108,28 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = [
-    "E", "W",    # pycodestyle
-    "F",         # pyflakes
-    "I",         # import sorting
-    "B",         # bugbear
-    "UP",        # pyupgrade
-    "SIM",       # simplify
-    "RUF",
+  "E", "W",  # pycodestyle
+  "F",       # pyflakes
+  "I",       # import sorting
+  "B",       # bugbear
+  "UP",      # pyupgrade
+  "SIM",     # simplify
+  "RUF",
 ]
 ignore = [
-    # The library deliberately swallows exceptions in the keepalive loop
-    # (documented: let the main thread discover the dead device) and in
-    # test teardown.
-    "B904",
+  # The library deliberately swallows exceptions in the keepalive loop
+  # (documented: let the main thread discover the dead device) and in
+  # test teardown.
+  "B904",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_akp02.py" = [
-    # Fake devices intentionally implement only the slice of the
-    # _HidDevice protocol each test needs, and reach into private
-    # attributes to assert on internal state.
-    "B011", "SIM117",
+  # Fake devices intentionally implement only the slice of the
+  # _HidDevice protocol each test needs, and reach into private
+  # attributes to assert on internal state.
+  "B011", "SIM117",
 ]
-
 
 # ---------------------------------------------------------------------
 # mypy

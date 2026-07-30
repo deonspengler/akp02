@@ -1,0 +1,79 @@
+# .github/workflows/release.yml
+#
+# Publishes to PyPI via trusted publishing (OIDC) -- no API token, no
+# repository secret. Triggered by publishing a GitHub Release, not by the
+# raw tag push, so tagging stays reversible and the actual upload needs a
+# deliberate second action.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The version lives in pyproject.toml, so nothing otherwise stops a
+      # v1.0.1 tag being cut against a tree that still says 1.0.0. PyPI
+      # uploads are immutable, so catch it here rather than after.
+      - name: Tag must match project version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $version"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches version $version"
+
+      # No hardware needed -- the whole suite runs against a fake HID
+      # device, so there is no reason not to gate the release on it.
+      - name: Test
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          pytest
+
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+
+      - name: Verify metadata
+        run: |
+          pip install twine
+          twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/akp02
+    permissions:
+      # Mandatory for trusted publishing. Also what lets the action
+      # generate PEP 740 provenance attestations.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

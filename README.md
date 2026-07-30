@@ -1,6 +1,10 @@
 # akp02
 
-Linux driver library for the **Ajazz AKP02** 9.2" (1920x462) USB
+[![PyPI](https://img.shields.io/pypi/v/akp02)](https://pypi.org/project/akp02/)
+[![Python](https://img.shields.io/pypi/pyversions/akp02)](https://pypi.org/project/akp02/)
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
+
+Linux library for the **Ajazz AKP02** 9.2" (1920x462) USB
 secondary display. The AKP02 officially ships with Windows-only
 software; this project is the result of reverse engineering its USB HID
 protocol so the panel can be driven natively from Linux.
@@ -12,18 +16,72 @@ keepalive operation.
 
 ## Install
 
+### Arch Linux
+
+Available in the AUR as
+[`python-akp02`](https://aur.archlinux.org/packages/python-akp02):
+
 ```bash
-pip install .
+paru -S python-akp02      # or yay, or makepkg -si
 ```
 
-Then allow non-root access to the device:
+The package installs the udev rule for you. Replug the panel afterwards
+and you're done -- skip the rest of this section.
+
+### Other distributions
 
 ```bash
+pip install akp02
+```
+
+Then install the udev rule so the device is usable without root. The
+rule ships inside the package, so there's no need to clone the repo:
+
+```bash
+sudo cp "$(python -c 'from importlib.resources import files; print(files("akp02") / "udev" / "99-akp02.rules")')" /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+**Replug the device after installing the rule** -- udev only applies it
+on the next connect.
+
+### From a checkout
+
+```bash
+git clone https://github.com/deonspengler/akp02
+cd akp02
+pip install .
 sudo cp udev/99-akp02.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-(replug the device after installing the rule)
+### Verify
+
+With the panel connected:
+
+```python
+from akp02 import AKP02
+
+with AKP02() as panel:
+    panel.set_brightness(30)
+```
+
+The backlight should visibly dim. A permissions error here almost always
+means the udev rule isn't active yet -- confirm the file is in
+`/etc/udev/rules.d/` and that you replugged the device.
+
+### Note on `hidapi`
+
+Most Linux users get a prebuilt `hidapi` wheel and need nothing extra.
+If pip falls back to building it from source -- unusual architecture, or
+a Python version newer than the available wheels -- install the headers
+first:
+
+```bash
+sudo apt install libhidapi-dev libudev-dev     # Debian/Ubuntu
+sudo dnf install hidapi-devel systemd-devel    # Fedora
+sudo pacman -S hidapi                          # Arch
+```
 
 ## Library
 
@@ -61,6 +119,7 @@ about this.
 pip install -e ".[test]"
 pytest
 ```
+
 105 tests, 100% line and branch coverage, run entirely against a fake
 HID device -- no physical hardware or `hidapi` installation required.
 Covers protocol byte-exactness pinned against real captures, the
@@ -68,6 +127,14 @@ region color-alignment correction with real hardware-confirmed data
 points, and concurrency behavior: dead-thread recovery after a
 disconnect, bounded shutdown against a wedged device, and
 lock-interleaving prevention verified under real contention.
+
+For linting and type checking as well:
+
+```bash
+pip install -e ".[dev]"
+ruff check .
+mypy
+```
 
 ## Protocol notes (reverse engineered)
 
@@ -78,13 +145,13 @@ Plain USB HID, no encryption. VID:PID `0300:3017`. Output reports are
 `"CRT" + 00 00 + <mnemonic> + 00 00 + <params>`
 
 | Mnemonic  | Action                                                |
-|-----------|---------------------------------------------------------|
-| `HAN`     | screen off                                             |
-| `DIS`     | screen on                                               |
-| `LIG`     | brightness (1 param byte, 0-100)                       |
-| `CONNECT` | heartbeat (device sleeps without periodic heartbeats)  |
-| `STP`     | commit / render buffered image data                    |
-| `SET`     | boot/display orientation (see below)                   |
+| --------- | ----------------------------------------------------- |
+| `HAN`     | screen off                                            |
+| `DIS`     | screen on                                             |
+| `LIG`     | brightness (1 param byte, 0-100)                      |
+| `CONNECT` | heartbeat (device sleeps without periodic heartbeats) |
+| `STP`     | commit / render buffered image data                   |
+| `SET`     | boot/display orientation (see below)                  |
 
 Layout exceptions: `CLE` (clear) uses a 3-byte gap plus a literal `0xFF`
 trailer instead of the usual 2-byte gap; `VER` (firmware version) has a
@@ -124,8 +191,8 @@ against the current framebuffer; if that read starts before the
 previous commit has actually finished settling internally, the
 in-flight commit can apparently be corrupted or aborted.
 
-**Boot/display orientation** (confirmed on real hardware): `"CRT" +
-00,00 + "SET" + 00,00 + 0x00 + <orientation byte>`, where the
+**Boot/display orientation** (confirmed on real hardware):
+`"CRT" + 00,00 + "SET" + 00,00 + 0x00 + <orientation byte>`, where the
 orientation byte is `0x00` for horizontal or `0x01` for vertical.
 Found by comparing two real captures of the same action with different
 outcomes -- the first capture only ever showed the default value
