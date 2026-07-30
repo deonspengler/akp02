@@ -1,0 +1,5 @@
+# Ajazz AKP02 9.2" USB secondary display (0300:3017)
+# Allows non-root user access to the HID device.
+# Install: sudo cp 99-akp02.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0300", ATTRS{idProduct}=="3017", TAG+="uaccess", MODE="0666"

@@ -1,0 +1,144 @@
+# akp02
+
+Linux driver library for the **Ajazz AKP02** 9.2" (1920x462) USB
+secondary display. The AKP02 officially ships with Windows-only
+software; this project is the result of reverse engineering its USB HID
+protocol so the panel can be driven natively from Linux.
+
+Confirmed on real hardware: full-screen frames, partial (region)
+updates including correct color rendering, brightness, screen on/off,
+clear, firmware version query, boot/display orientation, and sustained
+keepalive operation.
+
+## Install
+
+```bash
+pip install .
+```
+
+Then allow non-root access to the device:
+
+```bash
+sudo cp udev/99-akp02.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+(replug the device after installing the rule)
+
+## Library
+
+```python
+from akp02 import AKP02
+
+with AKP02() as panel:
+    panel.start_keepalive()            # device sleeps without heartbeats
+    panel.set_brightness(80)
+    panel.set_boot_orientation("vertical")  # live + persists across power cycles
+    panel.show(pil_image)              # full screen, letterboxed if needed
+    panel.show(widget, at=(1600, 16))  # partial update, rest preserved
+```
+
+All public methods are thread-safe: a single lock is held across whole
+multi-report image transfers so the keepalive thread can never
+interleave with or corrupt a frame. Image composition and JPEG encoding
+happen outside the lock, so the keepalive thread isn't blocked by them.
+
+A region update sent immediately after a full-frame draw needs a brief
+settling delay first, or the full frame can silently fail to render at
+all -- this is tracked and applied automatically; callers don't need to
+do anything.
+
+Region placement is also corrected automatically: the device renders a
+region with the wrong color unless its position satisfies a specific,
+confirmed alignment rule (see Protocol notes below). `show()` nudges
+the position by a few pixels when needed and warns when it does, so
+`at=(x, y)` always renders correctly without the caller having to know
+about this.
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+pytest
+```
+105 tests, 100% line and branch coverage, run entirely against a fake
+HID device -- no physical hardware or `hidapi` installation required.
+Covers protocol byte-exactness pinned against real captures, the
+region color-alignment correction with real hardware-confirmed data
+points, and concurrency behavior: dead-thread recovery after a
+disconnect, bounded shutdown against a wedged device, and
+lock-interleaving prevention verified under real contention.
+
+## Protocol notes (reverse engineered)
+
+Plain USB HID, no encryption. VID:PID `0300:3017`. Output reports are
+1024 bytes (EP1 OUT), input reports 512 bytes (EP2 IN).
+
+**Commands** are one zero-padded report:
+`"CRT" + 00 00 + <mnemonic> + 00 00 + <params>`
+
+| Mnemonic  | Action                                                |
+|-----------|---------------------------------------------------------|
+| `HAN`     | screen off                                             |
+| `DIS`     | screen on                                               |
+| `LIG`     | brightness (1 param byte, 0-100)                       |
+| `CONNECT` | heartbeat (device sleeps without periodic heartbeats)  |
+| `STP`     | commit / render buffered image data                    |
+| `SET`     | boot/display orientation (see below)                   |
+
+Layout exceptions: `CLE` (clear) uses a 3-byte gap plus a literal `0xFF`
+trailer instead of the usual 2-byte gap; `VER` (firmware version) has a
+leading `0x00` device-context byte before `CRT`, no gap after the
+mnemonic, and returns its answer via a synchronous `GET_REPORT` on the
+IN endpoint. Gap sizes are **not** universal across commands -- verify
+per command when adding new ones.
+
+**Image transfers**: a 32-byte `CRT..DRA` header (big-endian length =
+payload + 0x20, then width/height/x/y as big-endian uint16, all zero
+for a full-panel draw) followed immediately by JPEG bytes, chunked into
+1024-byte reports, then `STP`. The JPEG is 462x1920 **portrait** --
+landscape content rotated 90 degrees **clockwise** (confirmed on
+hardware; rotating the other way renders the panel upside down).
+Non-zero header coordinates draw a partial region (portrait space);
+content outside it is preserved.
+
+**Region color alignment** (confirmed empirically on real hardware): a
+region update renders with the wrong color -- not a placement shift --
+unless the position that actually lands in the header
+(`portrait_x = 462 - y - height`, in landscape terms) satisfies
+`portrait_x % 8 == 2`. Root cause understood, not just observed: 462
+(the axis this applies to) doesn't divide evenly into 8- or 16-pixel
+JPEG blocks the way 1920 (the other axis, which shows no equivalent
+sensitivity) does, so the device's firmware evidently pads its buffer
+on that axis with a fixed internal offset. The library corrects this
+automatically rather than requiring callers to pick special
+coordinates.
+
+**Settling delay**: a region update sent immediately after a
+full-frame draw can fail to render the full frame at all unless a
+brief delay (confirmed: 4ms is sufficient, 0ms fails; the library uses
+20ms for margin) separates them. Region-after-region and
+full-after-full both need no delay. Likely cause: a full-frame draw is
+a clean buffer replace, but a region draw is a read-modify-write
+against the current framebuffer; if that read starts before the
+previous commit has actually finished settling internally, the
+in-flight commit can apparently be corrupted or aborted.
+
+**Boot/display orientation** (confirmed on real hardware): `"CRT" +
+00,00 + "SET" + 00,00 + 0x00 + <orientation byte>`, where the
+orientation byte is `0x00` for horizontal or `0x01` for vertical.
+Found by comparing two real captures of the same action with different
+outcomes -- the first capture only ever showed the default value
+(indistinguishable from "no parameter"), a second capture with actual
+mode switches revealed the real byte. Confirmed to both apply
+immediately to the live display *and* persist as the boot-time
+default: verified by physically power-cycling the device after setting
+each value and observing the boot splash orientation match.
+
+hidapi note: `write()` needs a leading `0x00` report-ID placeholder per
+report; the kernel strips it before the wire (captures show no
+report-ID byte on the wire itself).
+
+## License
+
+MPL-2.0
