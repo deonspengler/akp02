@@ -13,7 +13,9 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import io
+import re
 import struct
 import sys
 import threading
@@ -439,6 +441,26 @@ class TestValidation:
         img = Image.new("RGB", (200, 100))
         with pytest.warns(UserWarning, match="shifted"):
             panel.show(img, at=(1920 - 200, 462 - 100))  # should not raise
+
+    @pytest.mark.parametrize("value", [0, -1, -0.5])
+    def test_start_keepalive_rejects_non_positive_interval(self, panel, value):
+        # Event.wait() returns immediately for these, so an unchecked
+        # value becomes a tight loop against the device rather than an
+        # error.
+        before = {t.ident for t in threading.enumerate()}
+        with pytest.raises(ValueError, match="keepalive interval"):
+            panel.start_keepalive(interval_sec=value)
+        assert alive_keepalives(before) == []
+
+    def test_start_keepalive_rejects_bad_interval_when_already_running(
+            self, panel):
+        # The check runs before the "already running" no-op, so a bad
+        # value is reported either way rather than depending on whether
+        # a thread happens to be alive.
+        panel.start_keepalive(interval_sec=10)
+        with pytest.raises(ValueError, match="keepalive interval"):
+            panel.start_keepalive(interval_sec=0)
+        panel.stop_keepalive()
 
     def test_raw_bytes_with_at_raises(self, panel):
         with pytest.raises(ValueError):
@@ -994,6 +1016,28 @@ class TestImageHandling:
 
 
 # ---------------------------------------------------------------------
+# Packaging
+# ---------------------------------------------------------------------
+
+class TestPackaging:
+    def test_version_is_a_release_string(self):
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?",
+                            akp02.__version__), akp02.__version__
+
+    def test_version_matches_installed_metadata(self):
+        # pyproject declares the version dynamic and hatchling parses it
+        # out of akp02/__init__.py, so a broken config surfaces as a
+        # built distribution whose metadata disagrees with the source --
+        # not as anything that fails at import. Skipped in a bare
+        # checkout, where there is no metadata to compare against.
+        try:
+            installed = importlib.metadata.version("akp02")
+        except importlib.metadata.PackageNotFoundError:
+            pytest.skip("akp02 is not installed in this environment")
+        assert installed == akp02.__version__
+
+
+# ---------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------
 
@@ -1004,8 +1048,7 @@ class TestLifecycle:
         assert fake_dev.closed is True
 
     def test_context_manager_closes_on_exception(self, fake_dev):
-        with pytest.raises(ZeroDivisionError):
-            with AKP02(dev=fake_dev):
+        with pytest.raises(ZeroDivisionError), AKP02(dev=fake_dev):
                 raise ZeroDivisionError
         assert fake_dev.closed is True
 
@@ -1014,6 +1057,67 @@ class TestLifecycle:
         with AKP02(dev=fake_dev) as p:
             p.start_keepalive(interval_sec=10)
         assert alive_keepalives(before) == []
+
+    def test_context_manager_starts_keepalive(self, fake_dev):
+        before = {t.ident for t in threading.enumerate()}
+        with AKP02(dev=fake_dev):
+            # alive_keepalives filters on is_alive() already.
+            assert len(alive_keepalives(before)) == 1
+        assert alive_keepalives(before) == []
+
+    def test_keepalive_none_starts_no_thread(self, fake_dev):
+        before = {t.ident for t in threading.enumerate()}
+        with AKP02(dev=fake_dev, keepalive=None) as p:
+            assert alive_keepalives(before) == []
+            assert p._keepalive_thread is None
+
+    def test_construction_alone_starts_no_thread(self, make_panel, fake_dev):
+        # The thread belongs to __enter__, not __init__: constructing a
+        # panel (as every test double here does) must have no background
+        # side effect.
+        before = {t.ident for t in threading.enumerate()}
+        p = make_panel(fake_dev)
+        assert alive_keepalives(before) == []
+        assert p._keepalive_thread is None
+
+    def test_context_manager_uses_the_configured_interval(self, make_panel,
+                                                          fake_dev):
+        # The interval reaches the thread, rather than __enter__ falling
+        # back to start_keepalive's own default.
+        p = make_panel(fake_dev, keepalive=0.01)
+        with p:
+            assert fake_dev is p._dev
+            deadline = time.monotonic() + 5
+            while not fake_dev.writes and time.monotonic() < deadline:
+                time.sleep(0.005)
+        assert fake_dev.writes, "no heartbeat within 5s at a 0.01s interval"
+        assert fake_dev.writes[0][1:9] == b"CRT\x00\x00CON"
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5])
+    def test_invalid_keepalive_interval_rejected(self, fake_dev, bad):
+        # Caught at construction, so the traceback points at the caller
+        # rather than surfacing later as a tight loop on the device.
+        with pytest.raises(ValueError, match="keepalive interval"):
+            AKP02(dev=fake_dev, keepalive=bad)
+
+    def test_explicit_start_inside_context_is_a_noop(self, fake_dev):
+        # Pre-1.1 code called start_keepalive() itself; that must stay
+        # harmless rather than spawning a second thread.
+        before = {t.ident for t in threading.enumerate()}
+        with AKP02(dev=fake_dev) as p:
+            first = p._keepalive_thread
+            p.start_keepalive()
+            assert p._keepalive_thread is first
+            assert len(alive_keepalives(before)) == 1
+
+    def test_stop_keepalive_inside_context_stays_stopped(self, fake_dev):
+        # Letting the panel sleep while still holding the handle open.
+        before = {t.ident for t in threading.enumerate()}
+        with AKP02(dev=fake_dev) as p:
+            p.stop_keepalive()
+            assert alive_keepalives(before) == []
+            p.clear()  # device still usable
+        assert fake_dev.closed is True
 
     def test_close_is_idempotent(self, fake_dev):
         p = AKP02(dev=fake_dev)

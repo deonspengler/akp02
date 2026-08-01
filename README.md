@@ -89,12 +89,27 @@ sudo pacman -S hidapi                          # Arch
 from akp02 import AKP02
 
 with AKP02() as panel:
-    panel.start_keepalive()            # device sleeps without heartbeats
     panel.set_brightness(80)
     panel.set_boot_orientation("vertical")  # live + persists across power cycles
     panel.show(pil_image)              # full screen, letterboxed if needed
     panel.show(widget, at=(1600, 16))  # partial update, rest preserved
 ```
+
+The panel sleeps unless it receives periodic heartbeats, so entering the
+context manager starts a keepalive thread for you (every 5s by default).
+`AKP02(keepalive=30)` changes the interval; `AKP02(keepalive=None)`
+starts nothing, for one-shot use or if you'd rather drive it yourself:
+
+```python
+panel.start_keepalive(interval_sec=10)  # or resume after a disconnect
+panel.stop_keepalive()                  # let the panel sleep
+panel.heartbeat()                       # one beat, e.g. from your own timer
+```
+
+The thread starts in `__enter__` rather than `__init__`, so constructing
+an `AKP02` never has a background side effect. Constructing one without
+the `with` statement means no automatic keepalive -- call
+`start_keepalive()` yourself in that case, and `close()` when done.
 
 All public methods are thread-safe: a single lock is held across whole
 multi-report image transfers so the keepalive thread can never
@@ -120,7 +135,7 @@ pip install -e ".[test]"
 pytest
 ```
 
-105 tests, 100% line and branch coverage, run entirely against a fake
+120 tests, 100% line and branch coverage, run entirely against a fake
 HID device -- no physical hardware or `hidapi` installation required.
 Covers protocol byte-exactness pinned against real captures, the
 region color-alignment correction with real hardware-confirmed data

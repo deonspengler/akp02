@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "akp02"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Linux library for the Ajazz AKP02 9.2\" 1920x462 USB HID display"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,9 @@ dependencies = [
   # mix-up and says so, but pinning it here is what stops it happening.
   "hidapi>=0.14",
 ]
+
+[tool.hatch.version]
+path = "akp02/__init__.py"
 
 [project.urls]
 Homepage = "https://github.com/deonspengler/akp02"
