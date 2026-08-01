@@ -24,15 +24,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The version lives in pyproject.toml, so nothing otherwise stops a
-      # v1.0.1 tag being cut against a tree that still says 1.0.0. PyPI
-      # uploads are immutable, so catch it here rather than after.
+      # Nothing otherwise stops a v1.0.1 tag being cut against a tree
+      # that still says 1.0.0. PyPI uploads are immutable, so catch it
+      # here rather than after.
+      #
+      # The version is dynamic: pyproject points hatchling at
+      # __version__ in akp02/__init__.py. Asking hatchling for it, rather
+      # than parsing the module, means this compares against the exact
+      # value that will be stamped onto the wheel -- a regex could drift
+      # from the build config and pass while the artifact disagrees.
       - name: Tag must match project version
         run: |
+          pip install hatchling
           tag="${GITHUB_REF_NAME#v}"
-          version=$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          version=$(python -m hatchling version)
           if [ "$tag" != "$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $version"
+            echo "::error::tag $GITHUB_REF_NAME does not match project version $version"
             exit 1
           fi
           echo "tag $GITHUB_REF_NAME matches version $version"
