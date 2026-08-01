@@ -63,6 +63,7 @@ With the panel connected:
 from akp02 import AKP02
 
 with AKP02() as panel:
+    panel.screen_on()
     panel.set_brightness(30)
 ```
 
@@ -89,6 +90,7 @@ sudo pacman -S hidapi                          # Arch
 from akp02 import AKP02
 
 with AKP02() as panel:
+    panel.screen_on()
     panel.set_brightness(80)
     panel.set_boot_orientation("vertical")  # live + persists across power cycles
     panel.show(pil_image)              # full screen, letterboxed if needed
