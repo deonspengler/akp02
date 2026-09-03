@@ -1218,6 +1218,30 @@ class TestOrientationGeometry:
         with pytest.raises(ValueError, match="HID_REPORT_SIZE"):
             panel._write_report(b"x" * (AKP02.HID_REPORT_SIZE + 1))
 
+    def test_a_misspelled_attribute_is_rejected(self, panel):
+        # `inverted` is the one knob with no method behind it, so a typo
+        # binds a dead attribute and the panel just keeps doing the
+        # default thing -- a frame that looks wrong with nothing pointing
+        # at the line that caused it. __slots__ turns that into an error
+        # at the assignment.
+        for name in ("invert", "inverted_", "inverted2"):
+            with pytest.raises(AttributeError, match=name):
+                setattr(panel, name, True)
+        panel.inverted = True          # the real one still works
+        assert panel.inverted is True
+
+    def test_subclasses_stay_open(self, fake_dev, make_panel):
+        # __slots__ closes AKP02 itself, not anything built on it: a
+        # subclass without its own __slots__ still gets a __dict__.
+        class Panel(AKP02):
+            pass
+
+        panel = make_panel(fake_dev, keepalive_interval=None)
+        sub = Panel(dev=FakeDevice(), keepalive_interval=None)
+        sub.my_own_state = 1
+        assert sub.my_own_state == 1
+        del panel
+
     def test_inverted_takes_any_truthy_value(self, fake_dev, make_panel):
         # A plain public attribute takes whatever is assigned, and the
         # transform is picked by a dict keyed on (orientation, bool) --

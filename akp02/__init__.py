@@ -128,6 +128,29 @@ class AKP02:
     own never starts a thread.
     """
 
+    # Every attribute an instance may have. Without this, the class
+    # accepts any assignment, so a misspelled `panel.inverted` binds a
+    # dead attribute in silence and the panel goes on doing the default
+    # thing -- the failure being a frame that looks wrong, with nothing
+    # pointing at the line that caused it. `inverted` is the one settable
+    # knob with no method behind it, so that is exactly where the mistake
+    # lands.
+    #
+    # Subclasses are unaffected: one without its own __slots__ still gets
+    # a __dict__ and stays open.
+    __slots__ = (
+        "_dev",
+        "_keepalive_interval",
+        "_keepalive_mgmt_lock",
+        "_keepalive_stop",
+        "_keepalive_thread",
+        "_last_show_was_full_screen",
+        "_lock",
+        "_orientation",
+        "inverted",
+        "jpeg_quality",
+    )
+
     VENDOR_ID = 0x0300
     PRODUCT_ID = 0x3017
 
