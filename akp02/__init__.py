@@ -314,7 +314,9 @@ class AKP02:
 
         The lock acquisition is bounded by timeout_sec for the same
         reason stop_keepalive's join is: a write wedged against a
-        hung device must not hang the caller forever. On timeout the
+        hung device must not hang the caller forever. The two waits are
+        sequential, so a fully wedged device can take up to twice
+        timeout_sec to return. On timeout the
         handle is deliberately LEAKED rather than closed, since the
         blocked writer may still be holding it; leaking a file
         descriptor is the cheaper of the two failures.
