@@ -219,6 +219,13 @@ mnemonic, and returns its answer via a synchronous `GET_REPORT` on the
 IN endpoint. Gap sizes are **not** universal across commands -- verify
 per command when adding new ones.
 
+**Brightness reset on screen-on** (observed on real hardware): the
+device reverts its backlight to its factory default (80) when the
+screen comes back on after `HAN`. The library tracks the last
+host-requested brightness and re-applies it in `screen_on()` -- right
+after `DIS`, in the same lock hold -- so an off/on cycle preserves the
+brightness the caller set.
+
 **Image transfers**: a 32-byte `CRT..DRA` header (big-endian length =
 payload + 0x20, then width/height/x/y as big-endian uint16, all zero
 for a full-panel draw) followed immediately by JPEG bytes, chunked into
