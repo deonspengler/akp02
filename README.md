@@ -165,6 +165,33 @@ the position by a few pixels when needed and warns when it does, so
 `at=(x, y)` always renders correctly without the caller having to know
 about this.
 
+## Examples
+
+Runnable scripts in [`examples/`](examples) -- repo only, not shipped in the
+sdist -- one file each, with the panel connected:
+
+```bash
+python examples/clock.py       # portrait background, one-second region updates
+python examples/animation.py   # landscape, a looping webp drawn into a region
+```
+
+`clock.py` composites a scrim over the strip of background the time sits on,
+then redraws only that band once a second; the rest of the image is never
+resent. `animation.py` does the same thing at frame rate, decoding every webp
+frame up front and cycling them into a fixed region. Between them they cover
+both orientations, full-frame draws, region updates, and the keepalive the
+context manager runs for you.
+
+`clock.py` renders its text with Liberation Mono (`ttf-liberation` on Arch,
+`fonts-liberation` on Debian/Ubuntu) and falls back to Pillow's built-in font
+if that isn't installed. Both image assets were generated with ComfyUI for
+this repository and are covered by its license -- reuse them freely.
+
+For a full application built on the library rather than a demo of it, see
+[akp02d](https://github.com/deonspengler/akp02d): a stats panel daemon that
+renders live system information to the display -- CPU, memory, network and
+temperatures -- updated in place with region draws.
+
 ## Tests
 
 ```bash
