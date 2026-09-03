@@ -381,6 +381,13 @@ class AKP02:
         """
         if self._dev is None:
             raise RuntimeError("device is closed")
+        if len(data) > self.HID_REPORT_SIZE:
+            # Otherwise reaches bytes() with a negative count below and
+            # fails as an unexplained "negative count".
+            raise ValueError(
+                f"report of {len(data)} bytes exceeds HID_REPORT_SIZE "
+                f"({self.HID_REPORT_SIZE}); callers must chunk"
+            )
         written = self._dev.write(
             bytes([0x00]) + data + bytes(self.HID_REPORT_SIZE - len(data))
         )

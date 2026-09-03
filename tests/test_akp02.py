@@ -1211,6 +1211,13 @@ class TestOrientationGeometry:
         panel.orientation(PORTRAIT)
         assert panel.size == (462, 1920)
 
+    def test_oversized_report_is_rejected_clearly(self, panel):
+        # The only uncovered branch otherwise. Internal callers all chunk,
+        # so this guards a future edit -- and without it the failure is an
+        # unexplained "negative count" from bytes() further down.
+        with pytest.raises(ValueError, match="HID_REPORT_SIZE"):
+            panel._write_report(b"x" * (AKP02.HID_REPORT_SIZE + 1))
+
     def test_inverted_takes_any_truthy_value(self, fake_dev, make_panel):
         # A plain public attribute takes whatever is assigned, and the
         # transform is picked by a dict keyed on (orientation, bool) --
