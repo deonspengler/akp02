@@ -172,7 +172,7 @@ pip install -e ".[test]"
 pytest
 ```
 
-143 tests, 100% line and branch coverage, run entirely against a fake
+148 tests, 100% line and branch coverage, run entirely against a fake
 HID device -- no physical hardware or `hidapi` installation required.
 Covers protocol byte-exactness pinned against real captures, the
 region color-alignment correction with real hardware-confirmed data
