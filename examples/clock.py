@@ -2,6 +2,7 @@
 """Portrait background with a live clock. Ctrl-C to quit."""
 
 import contextlib
+import math
 import time
 from pathlib import Path
 
@@ -34,7 +35,12 @@ with AKP02() as panel, contextlib.suppress(KeyboardInterrupt):
     panel.screen_on()
     panel.show(background)
 
+    tick = math.floor(time.time()) + 1
     while True:
-        now = time.strftime("%H:%M:%S")
-        panel.show(band(plate, now), at=(0, BAND_Y))
-        time.sleep(1 - time.time() % 1)
+        frame = band(plate, time.strftime("%H:%M:%S", time.localtime(tick)))
+        time.sleep(max(0.0, tick - time.time()))
+        panel.show(frame, at=(0, BAND_Y))
+
+        tick += 1
+        if tick <= time.time():  # push overran a whole second; resync
+            tick = math.floor(time.time()) + 1
