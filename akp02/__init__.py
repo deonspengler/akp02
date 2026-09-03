@@ -12,7 +12,8 @@ Usage:
             time.sleep(1)
 
 The device sleeps without heartbeats, so `with` starts a keepalive
-thread by default; AKP02(keepalive=None) leaves it to the caller.
+thread by default; AKP02(keepalive_interval=None) leaves it to the
+caller.
 
 Protocol summary (reverse-engineered, verified against real usbmon captures):
   - Plain USB HID, no encryption. VID:PID = 0300:3017.
@@ -178,7 +179,7 @@ class AKP02:
         self,
         dev: _HidDevice | None = None,
         jpeg_quality: int | None = None,
-        keepalive: float | None = KEEPALIVE_INTERVAL_SEC,
+        keepalive_interval: float | None = KEEPALIVE_INTERVAL_SEC,
     ) -> None:
         """Open the panel.
 
@@ -187,9 +188,10 @@ class AKP02:
         jpeg_quality (1-95) overrides the default encoding quality --
         small text UIs may want it higher.
 
-        keepalive is the interval in seconds __enter__ starts the
-        keepalive thread with, or None to not start one. Only recorded
-        here -- no thread is started by __init__ (see __enter__).
+        keepalive_interval is the interval in seconds __enter__ starts
+        the keepalive thread with, or None to not start one. Only
+        recorded here -- no thread is started by __init__ (see
+        __enter__).
 
         Raises DeviceNotFoundError if the panel isn't connected.
         """
@@ -202,8 +204,8 @@ class AKP02:
             )
         # Checked here too, so the traceback points at the construction
         # site rather than at __enter__.
-        if keepalive is not None:
-            self._check_keepalive_interval(keepalive)
+        if keepalive_interval is not None:
+            self._check_keepalive_interval(keepalive_interval)
         self.jpeg_quality: int = (
             self.JPEG_QUALITY if jpeg_quality is None else jpeg_quality
         )
@@ -216,7 +218,7 @@ class AKP02:
         self._keepalive_mgmt_lock = threading.Lock()
         self._keepalive_stop: threading.Event | None = None
         self._keepalive_thread: threading.Thread | None = None
-        self._keepalive_interval: float | None = keepalive
+        self._keepalive_interval: float | None = keepalive_interval
         # Tracks whether the last show() was full-screen, to know when the
         # settling delay is needed (see FULL_TO_REGION_SETTLE_SEC). Starts
         # True: if the very first show() call ever made is a region update
@@ -281,7 +283,7 @@ class AKP02:
         """Start the keepalive (unless disabled) and return self.
 
         The device sleeps without heartbeats, so this calls the public
-        start_keepalive() for you; AKP02(keepalive=None) opts out.
+        start_keepalive() for you; AKP02(keepalive_interval=None) opts out.
 
         Here rather than in __init__ because the keepalive closure holds
         a strong reference to self (an auto-started panel never closed
@@ -660,8 +662,8 @@ class AKP02:
         if interval_sec <= 0:
             raise ValueError(
                 f"keepalive interval must be greater than 0 seconds, got "
-                f"{interval_sec!r}; pass keepalive=None to AKP02() to not "
-                f"start one automatically"
+                f"{interval_sec!r}; pass keepalive_interval=None to AKP02() "
+                f"to not start one automatically"
             )
 
     def start_keepalive(self, interval_sec: float = KEEPALIVE_INTERVAL_SEC) -> None:
@@ -669,8 +671,8 @@ class AKP02:
 
         No-op if already running. Thread-safe: concurrent calls can't
         spawn two threads. __enter__ calls this for you unless
-        AKP02(keepalive=None) was passed; calling it directly is still
-        supported -- for a different interval, or to resume after a
+        AKP02(keepalive_interval=None) was passed; calling it directly is
+        still supported -- for a different interval, or to resume after a
         disconnect (see the dead-thread note below).
 
         Raises ValueError for a non-positive interval_sec, before the

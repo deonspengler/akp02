@@ -1067,7 +1067,7 @@ class TestLifecycle:
 
     def test_keepalive_none_starts_no_thread(self, fake_dev):
         before = {t.ident for t in threading.enumerate()}
-        with AKP02(dev=fake_dev, keepalive=None) as p:
+        with AKP02(dev=fake_dev, keepalive_interval=None) as p:
             assert alive_keepalives(before) == []
             assert p._keepalive_thread is None
 
@@ -1084,7 +1084,7 @@ class TestLifecycle:
                                                           fake_dev):
         # The interval reaches the thread, rather than __enter__ falling
         # back to start_keepalive's own default.
-        p = make_panel(fake_dev, keepalive=0.01)
+        p = make_panel(fake_dev, keepalive_interval=0.01)
         with p:
             assert fake_dev is p._dev
             deadline = time.monotonic() + 5
@@ -1098,7 +1098,7 @@ class TestLifecycle:
         # Caught at construction, so the traceback points at the caller
         # rather than surfacing later as a tight loop on the device.
         with pytest.raises(ValueError, match="keepalive interval"):
-            AKP02(dev=fake_dev, keepalive=bad)
+            AKP02(dev=fake_dev, keepalive_interval=bad)
 
     def test_explicit_start_inside_context_is_a_noop(self, fake_dev):
         # Pre-1.1 code called start_keepalive() itself; that must stay

@@ -102,8 +102,9 @@ message lists what was on the bus instead.
 
 The panel sleeps unless it receives periodic heartbeats, so entering the
 context manager starts a keepalive thread for you (every 5s by default).
-`AKP02(keepalive=30)` changes the interval; `AKP02(keepalive=None)`
-starts nothing, for one-shot use or if you'd rather drive it yourself:
+`AKP02(keepalive_interval=30)` changes the interval;
+`AKP02(keepalive_interval=None)` starts nothing, for one-shot use or if
+you'd rather drive it yourself:
 
 ```python
 panel.start_keepalive(interval_sec=10)  # or resume after a disconnect
