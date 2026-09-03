@@ -10,8 +10,12 @@ from PIL import Image, ImageDraw, ImageFont
 
 from akp02 import AKP02, Orientation
 
+try:
+    FONT = ImageFont.truetype("LiberationMono-Bold.ttf", 84)
+except OSError:
+    FONT = ImageFont.load_default(84)
+
 BACKGROUND = Path(__file__).resolve().parent / "background.jpg"
-FONT = ImageFont.truetype("LiberationMono-Bold.ttf", 84)
 BAND_Y, BAND_H = 170, 200
 SCRIM = Image.new("RGBA", (462, BAND_H), (0, 0, 0, 110))
 
