@@ -27,7 +27,7 @@ import pytest
 from PIL import Image, ImageChops
 
 import akp02
-from akp02 import _FULL_SCREEN, AKP02, _Rect
+from akp02 import _FULL_SCREEN, AKP02, DeviceNotFoundError, _Rect
 
 # ---------------------------------------------------------------------
 # Fake devices and helpers
@@ -356,14 +356,14 @@ class TestRegionMath:
 
 class TestDiscovery:
     def test_device_not_found_raises(self, fake_hid):
-        with pytest.raises(AKP02.DeviceNotFoundError):
+        with pytest.raises(DeviceNotFoundError):
             AKP02()
 
     def test_not_found_message_lists_candidates(self, fake_hid):
         fake_hid.enumerate = lambda: [
             {"vendor_id": 0x1234, "product_id": 0x5678,
              "product_string": "Some Keyboard", "path": b"/dev/x"}]
-        with pytest.raises(AKP02.DeviceNotFoundError, match="1234:5678"):
+        with pytest.raises(DeviceNotFoundError, match="1234:5678"):
             AKP02()
 
     def test_right_vendor_wrong_product_says_so(self, fake_hid):
@@ -373,7 +373,7 @@ class TestDiscovery:
         fake_hid.enumerate = lambda: [
             {"vendor_id": AKP02.VENDOR_ID, "product_id": 0x9999,
              "product_string": "Ajazz Other", "path": b"/dev/x"}]
-        with pytest.raises(AKP02.DeviceNotFoundError, match="wrong product"):
+        with pytest.raises(DeviceNotFoundError, match="wrong product"):
             AKP02()
 
     def test_wrong_hid_package_raises_actionable_importerror(self, fake_hid):

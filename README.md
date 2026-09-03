@@ -97,6 +97,9 @@ with AKP02() as panel:
     panel.show(widget, at=(1600, 16))  # partial update, rest preserved
 ```
 
+`AKP02()` raises `DeviceNotFoundError` if the panel isn't connected; the
+message lists what was on the bus instead.
+
 The panel sleeps unless it receives periodic heartbeats, so entering the
 context manager starts a keepalive thread for you (every 5s by default).
 `AKP02(keepalive=30)` changes the interval; `AKP02(keepalive=None)`

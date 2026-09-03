@@ -48,7 +48,7 @@ from typing import NamedTuple, Protocol, Self, cast
 
 from PIL import Image
 
-__all__ = ["AKP02"]
+__all__ = ["AKP02", "DeviceNotFoundError"]
 
 # Single source of truth: pyproject declares `dynamic = ["version"]` and
 # hatchling reads this line at build time, so there is no second copy to
@@ -90,6 +90,10 @@ class _HidDevice(Protocol):
     def close(self) -> None: ...
 
 
+class DeviceNotFoundError(Exception):
+    """Raised when no AKP02 is found on the USB bus."""
+
+
 class AKP02:
     """Handle to an AKP02 panel.
 
@@ -104,9 +108,6 @@ class AKP02:
     `with` starts the keepalive thread; constructing an AKP02 on its
     own never starts a thread.
     """
-
-    class DeviceNotFoundError(Exception):
-        """Raised when no AKP02 is found on the USB bus."""
 
     VENDOR_ID = 0x0300
     PRODUCT_ID = 0x3017
@@ -190,7 +191,7 @@ class AKP02:
         keepalive thread with, or None to not start one. Only recorded
         here -- no thread is started by __init__ (see __enter__).
 
-        Raises AKP02.DeviceNotFoundError if the panel isn't connected.
+        Raises DeviceNotFoundError if the panel isn't connected.
         """
         if (
             jpeg_quality is not None
@@ -260,7 +261,7 @@ class AKP02:
                     )
                     or "none"
                 )
-            raise cls.DeviceNotFoundError(
+            raise DeviceNotFoundError(
                 f"no HID device {cls.VENDOR_ID:04x}:{cls.PRODUCT_ID:04x} "
                 f"found; {detail}"
             )
