@@ -576,6 +576,12 @@ class AKP02:
         canvas.paste(img, ((w - new_size[0]) // 2, (h - new_size[1]) // 2))
         return canvas
 
+    def _encode_jpeg(self, img: Image.Image) -> bytes:
+        """JPEG-encode at the instance's quality (see show())."""
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=self.jpeg_quality)
+        return buf.getvalue()
+
     def show(
         self, image: Image.Image | bytes, at: tuple[int, int] | None = None
     ) -> None:
@@ -626,9 +632,7 @@ class AKP02:
                 rect = self._to_portrait_rect(x, y, img.width, img.height)
             # transpose() (exact permutation) rather than rotate()
             img = img.transpose(Image.Transpose.ROTATE_270)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=self.jpeg_quality)
-            jpeg = buf.getvalue()
+            jpeg = self._encode_jpeg(img)
         else:
             if at is not None:
                 raise ValueError("at= requires a PIL image, not raw bytes")
