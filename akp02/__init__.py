@@ -693,11 +693,15 @@ class AKP02:
             stop = self._keepalive_stop = threading.Event()
 
             def loop() -> None:
-                while not stop.wait(interval_sec):
-                    try:
+                # The try wraps the whole loop rather than each beat: the
+                # handler ends the thread either way, so the two are
+                # equivalent here, and this keeps the hot path one level
+                # shallower.
+                try:
+                    while not stop.wait(interval_sec):
                         self.heartbeat()
-                    except Exception:
-                        return  # device gone; let the main thread discover it
+                except Exception:
+                    return  # device gone; let the main thread discover it
 
             self._keepalive_thread = threading.Thread(
                 target=loop, name="akp02-keepalive", daemon=True
