@@ -236,8 +236,48 @@ class TestProtocolBytes:
         assert fake_dev.writes[-1][1:9] == b"CRT\x00\x00HAN"
 
     def test_screen_on_bytes(self, panel, fake_dev):
+        # screen_on() sends two reports: DIS, then a re-apply of the
+        # tracked brightness, because the device resets its backlight to
+        # the factory default when the screen comes on (see screen_on's
+        # docstring). The LIG follows DIS -- the reset is tied to the
+        # screen coming on, so it must come after.
         panel.screen_on()
-        assert fake_dev.writes[-1][1:9] == b"CRT\x00\x00DIS"
+        assert len(fake_dev.writes) == 2
+        assert fake_dev.writes[0][1:9] == b"CRT\x00\x00DIS"
+        expected = b"CRT" + bytes(2) + b"LIG" + bytes(2) + \
+            bytes([AKP02.BRIGHTNESS_DEFAULT])
+        assert fake_dev.writes[1][1:1 + len(expected)] == expected
+
+    def test_screen_on_reapplies_the_requested_brightness(self, panel,
+                                                           fake_dev):
+        # The reported bug: an off/on cycle used to come back at the
+        # device's factory default no matter what the caller had set.
+        panel.set_brightness(10)
+        panel.screen_off()
+        fake_dev.writes.clear()
+        panel.screen_on()
+        assert fake_dev.writes[0][1:9] == b"CRT\x00\x00DIS"
+        expected = b"CRT" + bytes(2) + b"LIG" + bytes(2) + bytes([10])
+        assert fake_dev.writes[1][1:1 + len(expected)] == expected
+
+    def test_screen_on_reapplies_brightness_without_a_prior_off(
+            self, panel, fake_dev):
+        # No HAN in between: the screen still comes on at the
+        # host-requested brightness, not the device's default.
+        panel.set_brightness(10)
+        panel.screen_on()
+        expected = b"CRT" + bytes(2) + b"LIG" + bytes(2) + bytes([10])
+        assert fake_dev.writes[-1][1:1 + len(expected)] == expected
+
+    def test_screen_on_sends_the_default_brightness_when_never_set(
+            self, panel, fake_dev):
+        # The caller never called set_brightness(): the re-apply sends
+        # BRIGHTNESS_DEFAULT, a no-op against the factory default -- and
+        # it covers a reset tied to DIS itself rather than to HAN.
+        panel.screen_on()
+        expected = b"CRT" + bytes(2) + b"LIG" + bytes(2) + \
+            bytes([AKP02.BRIGHTNESS_DEFAULT])
+        assert fake_dev.writes[1][1:1 + len(expected)] == expected
 
     def test_brightness_bytes(self, panel, fake_dev):
         panel.set_brightness(75)

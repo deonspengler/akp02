@@ -466,9 +466,20 @@ class AKP02:
             self._send_command(self.CMD_SCREEN_OFF)
 
     def screen_on(self) -> None:
-        """Turn the display panel on ("DIS")."""
+        """Turn the display panel on ("DIS").
+
+        Re-applies the brightness last set via set_brightness() right
+        after DIS, under the same lock hold. The device reverts its
+        backlight to its factory default (BRIGHTNESS_DEFAULT) when the
+        screen returns, so without the re-apply an off/on cycle would
+        leave it bright regardless of what the caller asked for. The
+        LIG must follow DIS -- the reset is tied to the screen coming
+        on -- and keeping both in one lock hold stops the keepalive
+        thread or another caller from interleaving between them.
+        """
         with self._lock:
             self._send_command(self.CMD_SCREEN_ON)
+            self._send_command(self.CMD_BRIGHTNESS, bytes([self._brightness]))
 
     def set_brightness(self, percent: int | None = None) -> int:
         """Get, or set, the backlight brightness ("LIG"), 0-100 percent.
