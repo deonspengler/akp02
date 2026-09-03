@@ -114,13 +114,13 @@ class AKP02:
     SCREEN_WIDTH = 1920
     SCREEN_HEIGHT = 462
 
-    HID_REPORT_SIZE = 1024   # EP1 OUT wMaxPacketSize from the device descriptor
+    HID_REPORT_SIZE = 1024  # EP1 OUT wMaxPacketSize from the device descriptor
     INPUT_REPORT_SIZE = 512  # EP2 IN wMaxPacketSize
-    JPEG_QUALITY = 85        # default; override per instance via __init__
+    JPEG_QUALITY = 85  # default; override per instance via __init__
     JPEG_QUALITY_MIN = 1
-    JPEG_QUALITY_MAX = 95    # Pillow advises <= 95; above it, size grows for
-                             # almost no visual gain
-    BRIGHTNESS_MIN = 0       # range of the LIG command's parameter byte
+    JPEG_QUALITY_MAX = 95  # Pillow advises <= 95; above it, size grows for
+    # almost no visual gain
+    BRIGHTNESS_MIN = 0  # range of the LIG command's parameter byte
     BRIGHTNESS_MAX = 100
 
     # A region update sent immediately after a full-frame draw can fail
@@ -157,9 +157,9 @@ class AKP02:
 
     CMD_SCREEN_OFF = b"HAN"
     CMD_SCREEN_ON = b"DIS"
-    CMD_BRIGHTNESS = b"LIG"     # + 1 param byte, 0-100
+    CMD_BRIGHTNESS = b"LIG"  # + 1 param byte, 0-100
     CMD_HEARTBEAT = b"CONNECT"  # device sleeps without periodic heartbeats
-    CMD_COMMIT = b"STP"         # render buffered image data
+    CMD_COMMIT = b"STP"  # render buffered image data
     CMD_BOOT_ORIENTATION = b"SET"  # + 0x00 + orientation byte, see below
 
     # Confirmed on real hardware: sets the panel orientation immediately
@@ -173,9 +173,12 @@ class AKP02:
     # Well inside the device's sleep timeout, with room for a missed beat.
     KEEPALIVE_INTERVAL_SEC = 5.0
 
-    def __init__(self, dev: _HidDevice | None = None,
-                 jpeg_quality: int | None = None,
-                 keepalive: float | None = KEEPALIVE_INTERVAL_SEC) -> None:
+    def __init__(
+        self,
+        dev: _HidDevice | None = None,
+        jpeg_quality: int | None = None,
+        keepalive: float | None = KEEPALIVE_INTERVAL_SEC,
+    ) -> None:
         """Open the panel.
 
         Pass an already-open hidapi device (or any _HidDevice-shaped
@@ -189,18 +192,20 @@ class AKP02:
 
         Raises AKP02.DeviceNotFoundError if the panel isn't connected.
         """
-        if (jpeg_quality is not None
-                and not self.JPEG_QUALITY_MIN <= jpeg_quality
-                <= self.JPEG_QUALITY_MAX):
+        if (
+            jpeg_quality is not None
+            and not self.JPEG_QUALITY_MIN <= jpeg_quality <= self.JPEG_QUALITY_MAX
+        ):
             raise ValueError(
-                f"jpeg_quality must be {self.JPEG_QUALITY_MIN}-"
-                f"{self.JPEG_QUALITY_MAX}")
+                f"jpeg_quality must be {self.JPEG_QUALITY_MIN}-{self.JPEG_QUALITY_MAX}"
+            )
         # Checked here too, so the traceback points at the construction
         # site rather than at __enter__.
         if keepalive is not None:
             self._check_keepalive_interval(keepalive)
-        self.jpeg_quality: int = (self.JPEG_QUALITY if jpeg_quality is None
-                                  else jpeg_quality)
+        self.jpeg_quality: int = (
+            self.JPEG_QUALITY if jpeg_quality is None else jpeg_quality
+        )
         self._dev: _HidDevice | None = dev if dev is not None else self._open()
         self._lock = threading.Lock()
         # Guards _keepalive_thread/_keepalive_stop management only. Separate
@@ -230,26 +235,35 @@ class AKP02:
             raise ImportError(
                 "the installed 'hid' module is not the 'hidapi' package "
                 "(hid.device is missing); run: pip uninstall hid && "
-                "pip install hidapi")
+                "pip install hidapi"
+            )
 
         devices = hid.enumerate()
         same_vendor = [d for d in devices if d["vendor_id"] == cls.VENDOR_ID]
-        matches = [d for d in same_vendor
-                   if d["product_id"] == cls.PRODUCT_ID]
+        matches = [d for d in same_vendor if d["product_id"] == cls.PRODUCT_ID]
         if not matches:
             if same_vendor:
-                detail = (f"found vendor {cls.VENDOR_ID:04x} but wrong "
-                          "product id(s): " + ", ".join(
-                              f"{d['product_id']:04x} "
-                              f"{d.get('product_string')!r}"
-                              for d in same_vendor))
+                detail = (
+                    f"found vendor {cls.VENDOR_ID:04x} but wrong "
+                    "product id(s): "
+                    + ", ".join(
+                        f"{d['product_id']:04x} {d.get('product_string')!r}"
+                        for d in same_vendor
+                    )
+                )
             else:
-                detail = "candidates: " + (", ".join(
-                    f"{d['vendor_id']:04x}:{d['product_id']:04x} "
-                    f"{d.get('product_string')!r}" for d in devices) or "none")
+                detail = "candidates: " + (
+                    ", ".join(
+                        f"{d['vendor_id']:04x}:{d['product_id']:04x} "
+                        f"{d.get('product_string')!r}"
+                        for d in devices
+                    )
+                    or "none"
+                )
             raise cls.DeviceNotFoundError(
                 f"no HID device {cls.VENDOR_ID:04x}:{cls.PRODUCT_ID:04x} "
-                f"found; {detail}")
+                f"found; {detail}"
+            )
         # The AKP02 currently exposes a single HID interface; if a firmware
         # revision ever adds more (as sibling Ajazz keypads do), prefer the
         # lowest interface number for a deterministic choice.
@@ -311,7 +325,8 @@ class AKP02:
                 f"{timeout_sec}s (a transfer is likely wedged); leaking the "
                 f"HID handle rather than closing it out from under the "
                 f"in-flight writer",
-                stacklevel=2)
+                stacklevel=2,
+            )
             return
         try:
             if self._dev is not None:
@@ -334,18 +349,17 @@ class AKP02:
         """
         if self._dev is None:
             raise RuntimeError("device is closed")
-        written = self._dev.write(bytes([0x00]) + data
-                                  + bytes(self.HID_REPORT_SIZE - len(data)))
+        written = self._dev.write(
+            bytes([0x00]) + data + bytes(self.HID_REPORT_SIZE - len(data))
+        )
         if written < 0:
-            raise OSError(
-                "HID write failed: " + (self._dev.error() or "unknown error"))
+            raise OSError("HID write failed: " + (self._dev.error() or "unknown error"))
 
     def _send_command(self, mnemonic: bytes, params: bytes = b"") -> None:
         self._write_report(b"CRT" + bytes(2) + mnemonic + bytes(2) + params)
 
     @staticmethod
-    def _crtdra_header(payload_len: int, rect: _Rect,
-                       flag: int = 0xB1) -> bytes:
+    def _crtdra_header(payload_len: int, rect: _Rect, flag: int = 0xB1) -> bytes:
         """Build the 32-byte image transfer header.
 
         rect is in portrait buffer space; _FULL_SCREEN (all zeros)
@@ -389,8 +403,8 @@ class AKP02:
         """Set the backlight brightness ("LIG"), 0-100 percent."""
         if not self.BRIGHTNESS_MIN <= percent <= self.BRIGHTNESS_MAX:
             raise ValueError(
-                f"brightness must be {self.BRIGHTNESS_MIN}-"
-                f"{self.BRIGHTNESS_MAX}")
+                f"brightness must be {self.BRIGHTNESS_MIN}-{self.BRIGHTNESS_MAX}"
+            )
         with self._lock:
             self._send_command(self.CMD_BRIGHTNESS, bytes([percent]))
 
@@ -408,15 +422,18 @@ class AKP02:
         0x00 + orientation byte, following the standard 2-byte-gap
         command pattern (unlike CLE/VER's exceptions).
         """
-        values = {"horizontal": self.ORIENTATION_HORIZONTAL,
-                  "vertical": self.ORIENTATION_VERTICAL}
+        values = {
+            "horizontal": self.ORIENTATION_HORIZONTAL,
+            "vertical": self.ORIENTATION_VERTICAL,
+        }
         if orientation not in values:
             raise ValueError(
-                f"orientation must be 'horizontal' or 'vertical', "
-                f"got {orientation!r}")
+                f"orientation must be 'horizontal' or 'vertical', got {orientation!r}"
+            )
         with self._lock:
-            self._send_command(self.CMD_BOOT_ORIENTATION,
-                               bytes([0x00, values[orientation]]))
+            self._send_command(
+                self.CMD_BOOT_ORIENTATION, bytes([0x00, values[orientation]])
+            )
 
     def clear(self) -> None:
         """Clear the screen ("CLE").
@@ -445,8 +462,7 @@ class AKP02:
             if dev is None:
                 raise RuntimeError("device is closed")
             self._write_report(bytes(1) + b"CRT" + bytes(2) + b"VER")
-            response = bytes(
-                dev.get_input_report(0x00, self.INPUT_REPORT_SIZE + 1))
+            response = bytes(dev.get_input_report(0x00, self.INPUT_REPORT_SIZE + 1))
         return response[1:].split(b"\x00", 1)[0].decode("ascii", errors="replace")
 
     def serial_number(self) -> str:
@@ -505,32 +521,35 @@ class AKP02:
         # the smallest non-negative up_shift reaching the target residue,
         # and its complementary down_shift reaching the same residue the
         # other way.
-        up_shift = ((residue - self.PORTRAIT_X_ALIGN_RESIDUE)
-                    % self.PORTRAIT_X_ALIGN_MODULUS)
+        up_shift = (
+            residue - self.PORTRAIT_X_ALIGN_RESIDUE
+        ) % self.PORTRAIT_X_ALIGN_MODULUS
         down_shift = self.PORTRAIT_X_ALIGN_MODULUS - up_shift
 
         def fits(candidate: int) -> bool:
             return candidate >= 0 and candidate + height <= self.SCREEN_HEIGHT
 
         for _shift, candidate_y in sorted(
-                [(up_shift, y + up_shift), (down_shift, y - down_shift)]):
+            [(up_shift, y + up_shift), (down_shift, y - down_shift)]
+        ):
             if fits(candidate_y):
                 warnings.warn(
                     f"akp02: region y={y} shifted to y={candidate_y} "
                     f"(height={height}) for correct color rendering -- see "
                     f"AKP02.PORTRAIT_X_ALIGN_MODULUS/PORTRAIT_X_ALIGN_RESIDUE",
-                    stacklevel=3)
+                    stacklevel=3,
+                )
                 return candidate_y
 
         warnings.warn(
             f"akp02: region y={y} (height={height}) cannot be shifted to a "
             f"color-safe position without leaving the panel -- drawing "
             f"uncorrected; this region's color may render incorrectly",
-            stacklevel=3)
+            stacklevel=3,
+        )
         return y
 
-    def _to_portrait_rect(self, x: int, y: int, width: int,
-                          height: int) -> _Rect:
+    def _to_portrait_rect(self, x: int, y: int, width: int, height: int) -> _Rect:
         """Map a rect from landscape space to the portrait buffer space.
 
         Follows the clockwise rotation used for full frames:
@@ -542,8 +561,7 @@ class AKP02:
         full frames looking correct while silently misplacing every
         region update.
         """
-        return _Rect(x=self.SCREEN_HEIGHT - y - height, y=x,
-                     width=height, height=width)
+        return _Rect(x=self.SCREEN_HEIGHT - y - height, y=x, width=height, height=width)
 
     def _letterbox(self, img: Image.Image) -> Image.Image:
         """Scale an image to fit the panel, preserving aspect ratio.
@@ -552,15 +570,15 @@ class AKP02:
         """
         w, h = self.SCREEN_WIDTH, self.SCREEN_HEIGHT
         scale = min(w / img.width, h / img.height)
-        new_size = (max(1, round(img.width * scale)),
-                    max(1, round(img.height * scale)))
+        new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (w, h), (0, 0, 0))
         canvas.paste(img, ((w - new_size[0]) // 2, (h - new_size[1]) // 2))
         return canvas
 
-    def show(self, image: Image.Image | bytes,
-             at: tuple[int, int] | None = None) -> None:
+    def show(
+        self, image: Image.Image | bytes, at: tuple[int, int] | None = None
+    ) -> None:
         """Display an image on the panel.
 
         Accepts a landscape PIL image, or ready portrait JPEG bytes
@@ -594,11 +612,16 @@ class AKP02:
                     img = self._letterbox(img)
             else:
                 x, y = at
-                if (x < 0 or y < 0 or x + img.width > self.SCREEN_WIDTH
-                        or y + img.height > self.SCREEN_HEIGHT):
+                if (
+                    x < 0
+                    or y < 0
+                    or x + img.width > self.SCREEN_WIDTH
+                    or y + img.height > self.SCREEN_HEIGHT
+                ):
                     raise ValueError(
                         f"region ({x},{y},{img.width}x{img.height}) does not "
-                        f"fit the {self.SCREEN_WIDTH}x{self.SCREEN_HEIGHT} screen")
+                        f"fit the {self.SCREEN_WIDTH}x{self.SCREEN_HEIGHT} screen"
+                    )
                 y = self._align_region_y(y, img.height)
                 rect = self._to_portrait_rect(x, y, img.width, img.height)
             # transpose() (exact permutation) rather than rotate()
@@ -615,7 +638,7 @@ class AKP02:
             if is_region and self._last_show_was_full_screen:
                 time.sleep(self.FULL_TO_REGION_SETTLE_SEC)
             for offset in range(0, len(payload), self.HID_REPORT_SIZE):
-                self._write_report(payload[offset:offset + self.HID_REPORT_SIZE])
+                self._write_report(payload[offset : offset + self.HID_REPORT_SIZE])
             self._send_command(self.CMD_COMMIT)
             self._last_show_was_full_screen = not is_region
 
@@ -633,10 +656,10 @@ class AKP02:
             raise ValueError(
                 f"keepalive interval must be greater than 0 seconds, got "
                 f"{interval_sec!r}; pass keepalive=None to AKP02() to not "
-                f"start one automatically")
+                f"start one automatically"
+            )
 
-    def start_keepalive(self,
-                        interval_sec: float = KEEPALIVE_INTERVAL_SEC) -> None:
+    def start_keepalive(self, interval_sec: float = KEEPALIVE_INTERVAL_SEC) -> None:
         """Start a daemon thread sending a heartbeat every interval_sec.
 
         No-op if already running. Thread-safe: concurrent calls can't
@@ -673,7 +696,8 @@ class AKP02:
                         return  # device gone; let the main thread discover it
 
             self._keepalive_thread = threading.Thread(
-                target=loop, name="akp02-keepalive", daemon=True)
+                target=loop, name="akp02-keepalive", daemon=True
+            )
             self._keepalive_thread.start()
 
     def stop_keepalive(self, timeout_sec: float = 5.0) -> None:
@@ -689,8 +713,10 @@ class AKP02:
             self._keepalive_stop.set()
             self._keepalive_thread.join(timeout_sec)
             if self._keepalive_thread.is_alive():
-                warnings.warn("akp02 keepalive thread did not stop within "
-                              f"{timeout_sec}s; abandoning it (daemon thread)",
-                              stacklevel=2)
+                warnings.warn(
+                    "akp02 keepalive thread did not stop within "
+                    f"{timeout_sec}s; abandoning it (daemon thread)",
+                    stacklevel=2,
+                )
             self._keepalive_thread = None
             self._keepalive_stop = None
