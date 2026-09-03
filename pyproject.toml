@@ -45,6 +45,9 @@ path = "akp02/__init__.py"
 Homepage = "https://github.com/deonspengler/akp02"
 Issues = "https://github.com/deonspengler/akp02/issues"
 Changelog = "https://github.com/deonspengler/akp02/releases"
+# A real consumer of the library, linked here so it reaches PyPI visitors
+# who never see the GitHub README.
+"Example application" = "https://github.com/deonspengler/akp02d"
 
 [project.optional-dependencies]
 test = [
