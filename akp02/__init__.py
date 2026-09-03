@@ -139,6 +139,7 @@ class AKP02:
     # Subclasses are unaffected: one without its own __slots__ still gets
     # a __dict__ and stays open.
     __slots__ = (
+        "_brightness",
         "_dev",
         "_keepalive_interval",
         "_keepalive_mgmt_lock",
@@ -169,6 +170,10 @@ class AKP02:
     JPEG_QUALITY_MAX = 95
     BRIGHTNESS_MIN = 0  # range of the LIG command's parameter byte
     BRIGHTNESS_MAX = 100
+    # The device's factory default: observed on real hardware to revert
+    # its backlight to this value after an off->on cycle, which is what
+    # screen_on() re-applies.
+    BRIGHTNESS_DEFAULT = 80
 
     # A region update sent immediately after a full-frame draw can stop
     # the full frame rendering at all (confirmed on real hardware: 4ms
@@ -253,6 +258,10 @@ class AKP02:
             self.JPEG_QUALITY if jpeg_quality is None else jpeg_quality
         )
         self._orientation: Orientation = Orientation.LANDSCAPE
+        # Tracks the last host-requested brightness so screen_on() can
+        # re-apply it (the device reverts to its default when the
+        # screen returns).
+        self._brightness: int = self.BRIGHTNESS_DEFAULT
         # Extra 180-degree rotation for an inverted mount (see show()).
         self.inverted: bool = False
         self._dev: _HidDevice | None = dev if dev is not None else self._open()
@@ -461,14 +470,27 @@ class AKP02:
         with self._lock:
             self._send_command(self.CMD_SCREEN_ON)
 
-    def set_brightness(self, percent: int) -> None:
-        """Set the backlight brightness ("LIG"), 0-100 percent."""
+    def set_brightness(self, percent: int | None = None) -> int:
+        """Get, or set, the backlight brightness ("LIG"), 0-100 percent.
+
+        With no argument, returns the current brightness and touches
+        nothing. With one, LIG is sent under the lock and the value is
+        remembered so screen_on() can re-apply it -- the device reverts
+        its backlight to BRIGHTNESS_DEFAULT when the screen returns, so
+        without this an off/on cycle would leave it bright again.
+
+        Returns the current brightness in every case.
+        """
+        if percent is None:
+            return self._brightness
         if not self.BRIGHTNESS_MIN <= percent <= self.BRIGHTNESS_MAX:
             raise ValueError(
                 f"brightness must be {self.BRIGHTNESS_MIN}-{self.BRIGHTNESS_MAX}"
             )
         with self._lock:
+            self._brightness = percent
             self._send_command(self.CMD_BRIGHTNESS, bytes([percent]))
+        return percent
 
     def heartbeat(self) -> None:
         """Send one keepalive heartbeat ("CONNECT") manually."""

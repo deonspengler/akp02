@@ -245,6 +245,19 @@ class TestProtocolBytes:
                           0x4c, 0x49, 0x47, 0x00, 0x00, 75])
         assert fake_dev.writes[-1][1:1 + len(expected)] == expected
 
+    def test_brightness_reads_back_without_touching_the_device(self, panel,
+                                                                fake_dev):
+        # No argument reads the tracked value. 80 is BRIGHTNESS_DEFAULT,
+        # the device's factory default the tracking starts from, so a
+        # first screen_on() re-applies a no-op rather than a value the
+        # caller never asked for.
+        assert panel.set_brightness() == 80
+        assert fake_dev.writes == []
+        panel.set_brightness(10)
+        fake_dev.writes.clear()
+        assert panel.set_brightness() == 10
+        assert fake_dev.writes == []
+
     def test_clear_bytes(self, panel, fake_dev):
         # NOT the standard 2-byte-gap pattern -- 3-byte gap plus a
         # hardcoded 0xFF trailer, per the layout exception documented on
@@ -421,6 +434,15 @@ class TestValidation:
     @pytest.mark.parametrize("value", [0, 50, 100])
     def test_brightness_accepts_in_range(self, panel, value):
         panel.set_brightness(value)  # should not raise
+
+    def test_brightness_out_of_range_leaves_tracked_state_unchanged(
+            self, panel):
+        # Validation must precede the state update: a rejected value can't
+        # become the one screen_on() later re-applies.
+        panel.set_brightness(10)
+        with pytest.raises(ValueError):
+            panel.set_brightness(101)
+        assert panel.set_brightness() == 10
 
     @pytest.mark.parametrize("value", [0, 96, 200])
     def test_jpeg_quality_rejects_out_of_range(self, make_panel, fake_dev,
