@@ -11,7 +11,7 @@ protocol so the panel can be driven natively from Linux.
 
 Confirmed on real hardware: full-screen frames, partial (region)
 updates including correct color rendering, brightness, screen on/off,
-clear, firmware version query, boot/display orientation, and sustained
+clear, firmware version query, splash-screen orientation, and sustained
 keepalive operation.
 
 ## Install
@@ -92,7 +92,6 @@ from akp02 import AKP02
 with AKP02() as panel:
     panel.screen_on()
     panel.set_brightness(80)
-    panel.set_boot_orientation("vertical")  # live + persists across power cycles
     panel.show(pil_image)              # full screen, letterboxed if needed
     panel.show(widget, at=(1600, 16))  # partial update, rest preserved
 ```
@@ -122,6 +121,38 @@ multi-report image transfers so the keepalive thread can never
 interleave with or corrupt a frame. Image composition and JPEG encoding
 happen outside the lock, so the keepalive thread isn't blocked by them.
 
+### Orientation and mounting
+
+The panel is sold as a 1920x462 landscape strip, and that is the default:
+`show()` takes landscape images and `at=(x, y)` is in landscape
+coordinates. Hang it on its side and switch:
+
+```python
+from akp02 import AKP02, Orientation
+
+panel.orientation(Orientation.PORTRAIT)  # now a 462x1920 surface
+panel.orientation()                      # read it back, sends nothing
+panel.size                               # (462, 1920) -- follows the mode
+```
+
+`show()` expects images in whichever mode is active, so build them at
+`panel.size` and they stay right across a switch. The JPEG on the wire
+is 462x1920 either way; only your view of it changes.
+
+If the panel is mounted the other way up, set `panel.inverted = True`.
+That turns the image a further 180 degrees, so what you draw at the top
+appears at the top of the panel as you are looking at it. It is a
+rotation, not a mirror -- text stays readable. It is software only, has
+no hardware command behind it, and does not change `panel.size`.
+
+`orientation()` also sends the device's `SET` command, which orients the
+splash screen the panel draws for itself at power-on. That setting
+persists across power cycles and is the command's *only* effect --
+nothing on the device rotates frames the host sends, which is why the
+rotation above happens here. Entering the context manager deliberately
+does not send `SET`, so a `with` block can't overwrite a splash setting
+you never mentioned.
+
 A region update sent immediately after a full-frame draw needs a brief
 settling delay first, or the full frame can silently fail to render at
 all -- this is tracked and applied automatically; callers don't need to
@@ -141,13 +172,20 @@ pip install -e ".[test]"
 pytest
 ```
 
-120 tests, 100% line and branch coverage, run entirely against a fake
+143 tests, 100% line and branch coverage, run entirely against a fake
 HID device -- no physical hardware or `hidapi` installation required.
 Covers protocol byte-exactness pinned against real captures, the
 region color-alignment correction with real hardware-confirmed data
 points, and concurrency behavior: dead-thread recovery after a
 disconnect, bounded shutdown against a wedged device, and
 lock-interleaving prevention verified under real contention.
+
+The orientation geometry is checked against Pillow and against the full
+frame rather than against the library's own arithmetic: for each of the
+four mode/inverted combinations, the net transform is identified by name
+from the whole dihedral group (and asserted to be a rotation, never a
+reflection), and a region is required to reproduce exactly the bytes the
+full frame put at that rect.
 
 For linting and type checking as well:
 
@@ -172,7 +210,7 @@ Plain USB HID, no encryption. VID:PID `0300:3017`. Output reports are
 | `LIG`     | brightness (1 param byte, 0-100)                      |
 | `CONNECT` | heartbeat (device sleeps without periodic heartbeats) |
 | `STP`     | commit / render buffered image data                   |
-| `SET`     | boot/display orientation (see below)                  |
+| `SET`     | splash-screen orientation (see below)                 |
 
 Layout exceptions: `CLE` (clear) uses a 3-byte gap plus a literal `0xFF`
 trailer instead of the usual 2-byte gap; `VER` (firmware version) has a
@@ -184,17 +222,20 @@ per command when adding new ones.
 **Image transfers**: a 32-byte `CRT..DRA` header (big-endian length =
 payload + 0x20, then width/height/x/y as big-endian uint16, all zero
 for a full-panel draw) followed immediately by JPEG bytes, chunked into
-1024-byte reports, then `STP`. The JPEG is 462x1920 **portrait** --
-landscape content rotated 90 degrees **clockwise** (confirmed on
-hardware; rotating the other way renders the panel upside down).
-Non-zero header coordinates draw a partial region (portrait space);
-content outside it is preserved.
+1024-byte reports, then `STP`. The JPEG is **always** 462x1920
+**portrait**; the library's orientation mode only decides which rotation
+it applies to get there -- landscape is 90 degrees **clockwise**
+(confirmed on hardware; the other way renders the panel upside down),
+portrait passes through unrotated, and `inverted` turns either a further
+180. Non-zero header coordinates draw a partial region in that buffer's
+space; content outside it is preserved.
 
 **Region color alignment** (confirmed empirically on real hardware): a
 region update renders with the wrong color -- not a placement shift --
-unless the position that actually lands in the header
-(`portrait_x = 462 - y - height`, in landscape terms) satisfies
-`portrait_x % 8 == 2`. Root cause understood, not just observed: 462
+unless the value that actually lands in the header's x field satisfies
+`x % 8 == 2`. Which of your coordinates that is depends on the mode: in
+landscape it is `462 - y - height`, in portrait it is `x` directly, and
+`inverted` reverses each. Root cause understood, not just observed: 462
 (the axis this applies to) doesn't divide evenly into 8- or 16-pixel
 JPEG blocks the way 1920 (the other axis, which shows no equivalent
 sensitivity) does, so the device's firmware evidently pads its buffer
@@ -212,16 +253,23 @@ against the current framebuffer; if that read starts before the
 previous commit has actually finished settling internally, the
 in-flight commit can apparently be corrupted or aborted.
 
-**Boot/display orientation** (confirmed on real hardware):
+**Splash-screen orientation** (confirmed on real hardware):
 `"CRT" + 00,00 + "SET" + 00,00 + 0x00 + <orientation byte>`, where the
 orientation byte is `0x00` for horizontal or `0x01` for vertical.
 Found by comparing two real captures of the same action with different
 outcomes -- the first capture only ever showed the default value
 (indistinguishable from "no parameter"), a second capture with actual
-mode switches revealed the real byte. Confirmed to both apply
-immediately to the live display *and* persist as the boot-time
-default: verified by physically power-cycling the device after setting
-each value and observing the boot splash orientation match.
+mode switches revealed the real byte. The setting persists across a
+power cycle, verified by physically unplugging and replugging after
+setting each value.
+
+It affects **only** the splash screen the device draws for itself at
+power-on -- it does not rotate frames sent by the host, and nothing
+visible happens when the command is sent. (An earlier reading of the
+same evidence had it applying to the live display too; the persisted
+splash coming back rotated after a replug is consistent with both, and
+the narrower one is correct.) The device therefore offers no way to
+rotate host frames, which is why the library rotates them itself.
 
 hidapi note: `write()` needs a leading `0x00` report-ID placeholder per
 report; the kernel strips it before the wire (captures show no

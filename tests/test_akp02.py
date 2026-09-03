@@ -27,7 +27,7 @@ import pytest
 from PIL import Image, ImageChops
 
 import akp02
-from akp02 import _FULL_SCREEN, AKP02, DeviceNotFoundError, _Rect
+from akp02 import _FULL_SCREEN, AKP02, DeviceNotFoundError, Orientation, _Rect
 
 # ---------------------------------------------------------------------
 # Fake devices and helpers
@@ -257,23 +257,34 @@ class TestProtocolBytes:
         panel.heartbeat()
         assert fake_dev.writes[-1][1:13] == b"CRT\x00\x00CONNECT"
 
-    def test_boot_orientation_vertical_matches_real_capture(self, panel, fake_dev):
+    def test_orientation_portrait_matches_real_capture(self, panel, fake_dev):
         # Confirmed on real hardware: switching horizontal->vertical
         # produced exactly this SET command.
-        panel.set_boot_orientation("vertical")
+        panel.orientation(Orientation.PORTRAIT)
         expected = bytes.fromhex("4352540000534554000000010000")
         assert fake_dev.writes[-1][1:1 + len(expected)] == expected
 
-    def test_boot_orientation_horizontal_matches_real_capture(self, panel, fake_dev):
+    def test_orientation_landscape_matches_real_capture(self, panel, fake_dev):
         # Confirmed on real hardware: switching vertical->horizontal
         # produced exactly this SET command.
-        panel.set_boot_orientation("horizontal")
+        panel.orientation(Orientation.LANDSCAPE)
         expected = bytes.fromhex("4352540000534554000000000000")
         assert fake_dev.writes[-1][1:1 + len(expected)] == expected
 
-    def test_boot_orientation_rejects_invalid_value(self, panel):
-        with pytest.raises(ValueError, match=r"horizontal.*vertical"):
-            panel.set_boot_orientation("diagonal")
+    def test_orientation_rejects_a_non_member(self, panel, fake_dev):
+        # The enum member's value IS the wire byte, so a bare int would
+        # otherwise sail through and send something unvalidated.
+        with pytest.raises(ValueError, match="Orientation member"):
+            panel.orientation(1)
+        assert fake_dev.writes == []
+
+    def test_orientation_reads_back_without_touching_the_device(self, panel,
+                                                                fake_dev):
+        assert panel.orientation() is Orientation.LANDSCAPE
+        panel.orientation(Orientation.PORTRAIT)
+        fake_dev.writes.clear()
+        assert panel.orientation() is Orientation.PORTRAIT
+        assert fake_dev.writes == []
 
     def test_commit_bytes_end_every_transfer(self, panel, fake_dev):
         # The commit is what actually makes the device render; nothing
@@ -335,18 +346,23 @@ class TestProtocolBytes:
         assert fake_dev.writes[-1][12:] == bytes(AKP02.HID_REPORT_SIZE - 11)
 
 
+LANDSCAPE, PORTRAIT = Orientation.LANDSCAPE, Orientation.PORTRAIT
+
+
 class TestRegionMath:
     def test_full_frame_maps_to_full_portrait_buffer(self, panel):
-        assert panel._to_portrait_rect(0, 0, 1920, 462) == (0, 0, 462, 1920)
+        assert panel._to_buffer_rect(_Rect(0, 0, 1920, 462),
+                                     LANDSCAPE, False) == (0, 0, 462, 1920)
 
     def test_arbitrary_region_transform(self, panel):
-        assert panel._to_portrait_rect(100, 50, 300, 150) == (262, 100, 150, 300)
+        assert panel._to_buffer_rect(_Rect(100, 50, 300, 150),
+                                     LANDSCAPE, False) == (262, 100, 150, 300)
 
     def test_transform_matches_the_documented_pixel_mapping(self, panel):
         # The rect transform and the image rotation must agree or regions
         # land in the wrong place. Check the documented clockwise
         # (x, y) -> (H-1-y, x) mapping on a 1x1 rect at the far corner.
-        rect = panel._to_portrait_rect(1919, 461, 1, 1)
+        rect = panel._to_buffer_rect(_Rect(1919, 461, 1, 1), LANDSCAPE, False)
         assert (rect.x, rect.y) == (0, 1919)
 
 
@@ -523,7 +539,7 @@ class TestErrorHandling:
 # ---------------------------------------------------------------------
 # Region color-alignment auto-correction. Confirmed on real hardware:
 # a region update renders with the wrong color unless the position that
-# actually lands in the header (portrait_x = SCREEN_HEIGHT - y - height)
+# actually lands in the header (header x = PANEL_SHORT_SIDE - y - height in landscape)
 # satisfies portrait_x % 8 == 2. show() corrects y automatically to
 # reach this, trying both directions and preferring the smaller shift.
 # The specific y/height pairs below are real values tested on the
@@ -531,61 +547,66 @@ class TestErrorHandling:
 # height=128) -- not arbitrary numbers.
 # ---------------------------------------------------------------------
 
+def _align_landscape_y(panel, y, height):
+    """The landscape-upright call, as these hardware cases were recorded."""
+    return panel._align_axis(y, height, "y", reflected=True)
+
+
 class TestColorAlignment:
     def test_already_aligned_y_is_unchanged_and_silent(self, panel):
         # y=84, height=128 -> portrait_x=250, 250%8=2: already aligned.
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # any warning here is a failure
-            assert panel._align_region_y(84, 128) == 84
+            assert _align_landscape_y(panel, 84, 128) == 84
 
     def test_known_bad_case_is_corrected(self, panel):
         # y=88, height=128 -> portrait_x=246, 246%8=6: confirmed bad on
         # real hardware; corrects to the confirmed-good y=84.
         with pytest.warns(UserWarning, match="shifted"):
-            assert panel._align_region_y(88, 128) == 84
+            assert _align_landscape_y(panel, 88, 128) == 84
 
     def test_original_reported_bug_is_corrected(self, panel):
         # The y=86 case that started this whole investigation.
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = panel._align_region_y(86, 128)
-        portrait_x = panel.SCREEN_HEIGHT - corrected - 128
-        assert portrait_x % panel.PORTRAIT_X_ALIGN_MODULUS == \
-            panel.PORTRAIT_X_ALIGN_RESIDUE
+            corrected = _align_landscape_y(panel, 86, 128)
+        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
+        assert portrait_x % panel.SHORT_AXIS_ALIGN_MODULUS == \
+            panel.SHORT_AXIS_ALIGN_RESIDUE
 
     def test_correction_prefers_smaller_shift(self, panel):
         # y=88 is 4 away from y=84 (down) and 4 away from y=92 (up) --
         # a genuine tie. y=87 is 3 away from y=84 (down) and 5 away from
         # y=92 (up), so down should be strictly preferred.
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = panel._align_region_y(87, 128)
+            corrected = _align_landscape_y(panel, 87, 128)
         assert abs(corrected - 87) <= 4
 
     def test_near_top_edge_shifts_up_not_negative(self, panel):
         # y=2 can't shift down without going negative -- must shift up.
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = panel._align_region_y(2, 128)
+            corrected = _align_landscape_y(panel, 2, 128)
         assert corrected >= 0
-        portrait_x = panel.SCREEN_HEIGHT - corrected - 128
+        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
         assert portrait_x % 8 == 2
 
     def test_near_bottom_edge_shifts_down_not_past_screen(self, panel):
-        # Shifting up would push height=128 past SCREEN_HEIGHT=462.
-        y = panel.SCREEN_HEIGHT - 128 - 1
+        # Shifting up would push height=128 past PANEL_SHORT_SIDE=462.
+        y = panel.PANEL_SHORT_SIDE - 128 - 1
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = panel._align_region_y(y, 128)
-        assert corrected + 128 <= panel.SCREEN_HEIGHT
-        portrait_x = panel.SCREEN_HEIGHT - corrected - 128
+            corrected = _align_landscape_y(panel, y, 128)
+        assert corrected + 128 <= panel.PANEL_SHORT_SIDE
+        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
         assert portrait_x % 8 == 2
 
     def test_impossible_case_warns_and_returns_uncorrected(self, panel):
         # height=461 (not 462 -- see the full-height exception below)
         # leaves too little room on either side to fit either shift.
         with pytest.warns(UserWarning, match="cannot be shifted"):
-            result = panel._align_region_y(0, 461)
+            result = _align_landscape_y(panel, 0, 461)
         assert result == 0  # returned unchanged, not silently altered
 
     def test_full_height_needs_no_correction_and_warns_never(self, panel):
-        # Confirmed on real hardware: height == SCREEN_HEIGHT (a region
+        # Confirmed on real hardware: height == PANEL_SHORT_SIDE (a region
         # spanning the whole short axis, only ever at y=0) renders
         # correctly with no correction -- consistent with our
         # understanding of the bug, since there's no partial remainder
@@ -594,7 +615,7 @@ class TestColorAlignment:
         # general rule, but must NOT warn, unlike a real unfixable case.
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert panel._align_region_y(0, panel.SCREEN_HEIGHT) == 0
+            assert _align_landscape_y(panel, 0, panel.PANEL_SHORT_SIDE) == 0
 
     def test_only_y_is_adjusted_x_and_size_are_not(self, panel, fake_dev):
         img = Image.new("RGB", (200, 100))
@@ -604,7 +625,8 @@ class TestColorAlignment:
         w, h, x, y = struct.unpack(">HHHH", header[13:21])
         # x and size must match a call with the CORRECTED y and nothing
         # else changed.
-        assert (x, y, w, h) == panel._to_portrait_rect(1600, 48, 200, 100)
+        assert (x, y, w, h) == panel._to_buffer_rect(
+            _Rect(1600, 48, 200, 100), LANDSCAPE, False)
 
 
 class TestSettlingDelay:
@@ -885,9 +907,10 @@ class TestImageHandling:
         header = fake_dev.writes[0][1:33]
         w, h, x, y = struct.unpack(">HHHH", header[13:21])
         # y=50 is not color-aligned; the library corrects it to y=48
-        # automatically (see AKP02._align_region_y) -- the header must
+        # automatically (see AKP02._align_axis) -- the header must
         # reflect the CORRECTED position, not the one originally requested.
-        assert (x, y, w, h) == panel._to_portrait_rect(100, 48, 200, 100)
+        assert (x, y, w, h) == panel._to_buffer_rect(
+            _Rect(100, 48, 200, 100), LANDSCAPE, False)
 
     def test_declared_length_matches_the_bytes_actually_sent(self, panel,
                                                              fake_dev):
@@ -927,7 +950,7 @@ class TestImageHandling:
         assert_close(out.getpixel((346, 1440)), (0, 255, 0))    # bottom-right
 
     def test_region_lands_where_the_full_frame_puts_it(self, make_panel):
-        # The pixel rotation and _to_portrait_rect are two descriptions
+        # The pixel rotation and _to_buffer_rect are two descriptions
         # of the same landscape -> portrait mapping, so they must agree.
         # Rather than pinning each separately, this checks them against
         # each other: render a scene as a full frame, then render one
@@ -948,7 +971,7 @@ class TestImageHandling:
         full_fb = decode_sent_image(full_dev.writes[:-1]).convert("RGB")
 
         box = (600, 100, 904, 300)  # y+height=300, 300%8=4 -- color-aligned
-                                     # per AKP02.PORTRAIT_X_ALIGN_MODULUS/
+                                     # per AKP02.SHORT_AXIS_ALIGN_MODULUS/
                                      # RESIDUE, so this test stays focused on
                                      # rotation/rect consistency without also
                                      # incidentally exercising auto-correction
@@ -966,7 +989,7 @@ class TestImageHandling:
         mad = sum(i * n for i, n in enumerate(diff.histogram())) / (w * h)
         assert mad < 12, (
             f"region landed in the wrong place (mean abs difference {mad:.1f})"
-            " -- the transpose and _to_portrait_rect disagree")
+            " -- the transpose and _to_buffer_rect disagree")
 
     def test_wrong_sized_image_is_letterboxed_not_stretched(self, panel,
                                                             fake_dev):
@@ -1014,6 +1037,210 @@ class TestImageHandling:
         assert img.size == (1920, 462)
         assert img.getpixel((0, 0)) == (1, 2, 3)
 
+
+# ---------------------------------------------------------------------
+# Orientation and inverted. The wire format never changes -- the JPEG is
+# always 462x1920 -- so these are about the one net rotation each
+# combination applies, and about a region's rect going through that same
+# rotation. Checked against PIL and against the full frame rather than
+# against the library's own arithmetic.
+# ---------------------------------------------------------------------
+
+COMBOS = [(o, i) for o in (LANDSCAPE, PORTRAIT) for i in (False, True)]
+DIHEDRAL = {
+    "identity": None,
+    "ROTATE_90": Image.Transpose.ROTATE_90,
+    "ROTATE_180": Image.Transpose.ROTATE_180,
+    "ROTATE_270": Image.Transpose.ROTATE_270,
+    "FLIP_LEFT_RIGHT": Image.Transpose.FLIP_LEFT_RIGHT,
+    "FLIP_TOP_BOTTOM": Image.Transpose.FLIP_TOP_BOTTOM,
+    "TRANSPOSE": Image.Transpose.TRANSPOSE,
+    "TRANSVERSE": Image.Transpose.TRANSVERSE,
+}
+REFLECTIONS = {"FLIP_LEFT_RIGHT", "FLIP_TOP_BOTTOM", "TRANSPOSE", "TRANSVERSE"}
+
+
+def _configured(make_panel, dev, orientation, inverted):
+    p = make_panel(dev)
+    p.orientation(orientation)
+    p.inverted = inverted
+    dev.writes.clear()          # drop the SET, leave only the transfer
+    return p
+
+
+def _asymmetric_scene(size):
+    """A scene no rotation or reflection of itself can be mistaken for."""
+    w, h = size
+    img = Image.new("RGB", (w, h), (12, 12, 12))
+    img.paste((255, 0, 0), (0, 0, w // 4, h // 4))
+    img.paste((0, 255, 0), (w - w // 5, 0, w, h // 6))
+    img.paste((0, 0, 255), (0, h - h // 3, w // 6, h))
+    return img
+
+
+def _identify(src, out):
+    """Name the dihedral transform taking src to out."""
+    best, best_err = None, None
+    for name, transpose in DIHEDRAL.items():
+        cand = src if transpose is None else src.transpose(transpose)
+        if cand.size != out.size:
+            continue
+        a, b = cand.load(), out.load()
+        w, h = cand.size
+        pts = [(x, y) for x in range(3, w, max(1, w // 30))
+               for y in range(3, h, max(1, h // 30))]
+        err = sum(sum(abs(m - n) for m, n in zip(a[q], b[q], strict=True))
+                  for q in pts) / len(pts)
+        if best_err is None or err < best_err:
+            best, best_err = name, err
+    return best
+
+
+class TestOrientationGeometry:
+    @pytest.mark.parametrize("orientation,inverted,expected", [
+        (LANDSCAPE, False, "ROTATE_270"),
+        (LANDSCAPE, True, "ROTATE_90"),
+        (PORTRAIT, False, "identity"),
+        (PORTRAIT, True, "ROTATE_180"),
+    ])
+    def test_each_combination_applies_one_net_rotation(
+            self, fake_dev, make_panel, orientation, inverted, expected):
+        # `inverted` must be a ROTATION. Composing a flip with the
+        # landscape turn instead gives a reflection, which renders text
+        # backwards -- it looks plausible in a solid-colour test and is
+        # obviously wrong on a real panel, so the check is what transform
+        # was applied, not merely that pixels moved.
+        panel = _configured(make_panel, fake_dev, orientation, inverted)
+        src = _asymmetric_scene(panel.size)
+        panel.show(src)
+        name = _identify(src, decode_sent_image(fake_dev.writes[:-1]))
+        assert name == expected
+        assert name not in REFLECTIONS
+
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    def test_inverted_is_the_upright_frame_seen_upside_down(
+            self, make_panel, orientation, inverted):
+        # The property a user actually cares about: walk around the panel
+        # and you see the same picture, not a mirrored one.
+        if not inverted:
+            pytest.skip("checked from the inverted side of the pair")
+        up_dev, inv_dev = FakeDevice(), FakeDevice()
+        up = _configured(make_panel, up_dev, orientation, False)
+        inv = _configured(make_panel, inv_dev, orientation, True)
+        src = _asymmetric_scene(up.size)
+        up.show(src)
+        inv.show(src)
+        want = decode_sent_image(up_dev.writes[:-1]).transpose(
+            Image.Transpose.ROTATE_180)
+        got = decode_sent_image(inv_dev.writes[:-1])
+        assert _identify(want, got) == "identity"
+
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    def test_a_region_lands_where_the_full_frame_puts_it(
+            self, make_panel, orientation, inverted):
+        # The rect and the pixels are two descriptions of one rotation.
+        # Drawing a crop as a region must reproduce exactly the bytes the
+        # full frame put at that rect -- this is what catches a rect
+        # transform that has drifted from _TRANSPOSE.
+        full_dev, region_dev = FakeDevice(), FakeDevice()
+        full = _configured(make_panel, full_dev, orientation, inverted)
+        region = _configured(make_panel, region_dev, orientation, inverted)
+        src = _asymmetric_scene(full.size)
+        full.show(src)
+        whole = decode_sent_image(full_dev.writes[:-1])
+
+        w, h = (96, 64) if full.size[1] == AKP02.PANEL_SHORT_SIDE else (64, 96)
+        placed = False
+        for pos in range(8, 120):
+            at = (40, pos) if full.size[1] == AKP02.PANEL_SHORT_SIDE else (pos, 40)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                region_dev.writes.clear()
+                region.show(src.crop((at[0], at[1], at[0] + w, at[1] + h)),
+                            at=at)
+            if caught:
+                continue        # the aligner moved it; compare like with like
+            placed = True
+            break
+        assert placed, "no unshifted position found"
+
+        header, _ = payload_of(region_dev.writes[:-1])
+        rw, rh, rx, ry = struct.unpack(">HHHH", header[13:21])
+        patch = whole.crop((rx, ry, rx + rw, ry + rh))
+        sent = decode_sent_image(region_dev.writes[:-1])
+        assert sent.size == (rw, rh)
+        assert _identify(patch, sent) == "identity"
+
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    def test_correction_lands_the_header_x_on_the_rule(
+            self, make_panel, orientation, inverted):
+        # Which coordinate moves, and which way, differs across all four
+        # combinations -- inverting swaps whether the header's x runs
+        # with or against the caller's. Sweep positions and check the
+        # value that actually reaches the header.
+        dev = FakeDevice()
+        panel = _configured(make_panel, dev, orientation, inverted)
+        short_is_y = panel.size[1] == AKP02.PANEL_SHORT_SIDE
+        w, h = (96, 64) if short_is_y else (64, 96)
+        for start in range(0, 24):
+            dev.writes.clear()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                panel.show(Image.new("RGB", (w, h), (200, 100, 50)),
+                           at=(40, start) if short_is_y else (start, 40))
+            header, _ = payload_of(dev.writes[:-1])
+            rx = struct.unpack(">HHHH", header[13:21])[2]
+            rw, rh = struct.unpack(">HHHH", header[13:21])[:2]
+            assert rx % AKP02.SHORT_AXIS_ALIGN_MODULUS == \
+                AKP02.SHORT_AXIS_ALIGN_RESIDUE, (orientation, inverted, start)
+            # Only the position moves: the region keeps its size.
+            assert sorted((rw, rh)) == sorted((w, h))
+
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    def test_the_transfer_is_always_a_portrait_buffer(
+            self, make_panel, orientation, inverted):
+        dev = FakeDevice()
+        panel = _configured(make_panel, dev, orientation, inverted)
+        panel.show(Image.new("RGB", panel.size))
+        assert decode_sent_image(dev.writes[:-1]).size == (462, 1920)
+
+    def test_size_follows_the_orientation_and_ignores_inverted(self, panel):
+        assert panel.size == (1920, 462)
+        panel.inverted = True
+        assert panel.size == (1920, 462)   # a half turn keeps the shape
+        panel.orientation(PORTRAIT)
+        assert panel.size == (462, 1920)
+
+    def test_inverted_takes_any_truthy_value(self, fake_dev, make_panel):
+        # A plain public attribute takes whatever is assigned, and the
+        # transform is picked by a dict keyed on (orientation, bool) --
+        # so a truthy non-bool has to be coerced, not KeyError.
+        panel = make_panel(fake_dev, keepalive_interval=None)
+        for value in (1, "yes", 0, "", None):
+            panel.inverted = value
+            panel.show(Image.new("RGB", panel.size))
+
+    def test_failed_orientation_write_leaves_the_mode_alone(self, make_panel):
+        # The call raises, so the caller assumes nothing happened; the
+        # host must not go on rendering for a mode the device rejected.
+        class Unplugged(FakeDevice):
+            def write(self, data):
+                raise OSError("unplugged")
+
+        panel = make_panel(Unplugged(), keepalive_interval=None)
+        with pytest.raises(OSError):
+            panel.orientation(PORTRAIT)
+        assert panel.orientation() is LANDSCAPE
+        assert panel.size == (1920, 462)
+
+    def test_entering_the_context_sends_no_orientation_command(
+            self, fake_dev, make_panel):
+        # The splash orientation is persisted device state; a `with` must
+        # not overwrite a setting the caller never mentioned.
+        panel = make_panel(fake_dev, keepalive_interval=None)
+        with panel:
+            pass
+        assert fake_dev.writes == []
 
 # ---------------------------------------------------------------------
 # Packaging

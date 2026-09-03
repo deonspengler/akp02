@@ -1,40 +1,25 @@
 """Linux library for the Ajazz AKP02 (9.2" 1920x462) USB HID display.
 
-Usage:
-
-    from akp02 import AKP02
-
-    with AKP02() as panel:                          # keepalive starts here
-        panel.set_brightness(80)
-        while True:
-            panel.show(render_dashboard())          # full screen
-            panel.show(clock_img, at=(1600, 20))    # partial update
-            time.sleep(1)
-
 The device sleeps without heartbeats, so `with` starts a keepalive
 thread by default; AKP02(keepalive_interval=None) leaves it to the
 caller.
 
-Protocol summary (reverse-engineered, verified against real usbmon captures):
-  - Plain USB HID, no encryption. VID:PID = 0300:3017.
-  - Commands: "CRT" + 00 00 + <mnemonic> + 00 00 + <params>, zero-padded to
-    one HID report (see the AKP02.CMD_* attributes for known mnemonics).
-    Layout exceptions: clear "CLE" (see AKP02.clear) and the firmware
-    version query "VER" (see AKP02.firmware_version).
-  - Image transfers: 32-byte CRTDRA header (see AKP02._crtdra_header) followed
-    immediately by JPEG bytes, sent as one continuous stream chunked into
-    1024-byte HID reports, then a commit (STP) command.
-  - The JPEG payload is 462x1920 PORTRAIT (landscape content rotated 90
-    degrees clockwise before encoding; confirmed on hardware -- rotating
-    the other way renders the panel upside down).
-  - hidapi's write() needs a leading 0x00 placeholder byte per report; the
-    kernel strips it before the wire (captures show no report-ID byte).
-  - Region updates: non-zero x/y/width/height in the header draw a partial
-    region (portrait-space coordinates); content outside it is preserved.
-    Verified on hardware. A region renders with the WRONG COLOR (not a
-    placement shift) unless its position satisfies a specific alignment
-    -- see AKP02.PORTRAIT_X_ALIGN_MODULUS/RESIDUE for the confirmed rule
-    and why; show() corrects this automatically.
+By default the panel runs in the landscape (1920x462) layout it is
+sold as: show() takes landscape input, rotates it into the 462x1920
+portrait buffer the device expects, and treats at=(x, y) as landscape
+coordinates. panel.orientation(Orientation.PORTRAIT) switches it to
+portrait (462x1920), after which show() takes portrait input unrotated
+and at=(x, y) as buffer coordinates. Setting panel.inverted turns
+either mode a further 180 degrees, for a panel mounted the other way
+up. The JPEG sent is 462x1920 in every case (see show()).
+
+Protocol (reverse-engineered; details in the README, "Protocol notes
+(reverse engineered)"): commands are "CRT" + 00 00 + <mnemonic> +
+00 00 + <params> (AKP02.CMD_* for the mnemonics), and image transfers
+are a 32-byte CRTDRA header (AKP02._crtdra_header) + JPEG, chunked
+into 1024-byte reports, then a commit (STP). The JPEG is always
+462x1920 PORTRAIT; landscape's 90 degrees clockwise is the
+hardware-confirmed rotation.
 """
 
 from __future__ import annotations
@@ -45,16 +30,49 @@ import threading
 import time
 import warnings
 from collections.abc import Sequence
+from enum import IntEnum
 from typing import NamedTuple, Protocol, Self, cast
 
 from PIL import Image
 
-__all__ = ["AKP02", "DeviceNotFoundError"]
+__all__ = ["AKP02", "DeviceNotFoundError", "Orientation"]
 
 # Single source of truth: pyproject declares `dynamic = ["version"]` and
 # hatchling reads this line at build time, so there is no second copy to
 # forget to bump.
 __version__ = "1.1.0"
+
+
+class Orientation(IntEnum):
+    """Panel orientation, expressed as the byte the SET command sends.
+
+    LANDSCAPE is the 1920x462 layout the panel is sold as; PORTRAIT
+    turns the glass 90 degrees, so the caller sees 462x1920. Neither is
+    the transfer's own orientation -- that is always the 462x1920
+    buffer, whichever way the glass is hung. The member value *is* the
+    wire byte, so there is no second copy to keep in step.
+
+    Confirmed on real hardware: SET only sets which way up the device
+    draws its own power-on splash, and persists that (verified by
+    unplugging and replugging after setting each value). It does not
+    rotate frames the host sends -- nothing on the device does, which is
+    why show() rotates them here.
+    """
+
+    LANDSCAPE = 0x00
+    PORTRAIT = 0x01
+
+
+# The single net rotation show() applies, per (orientation, inverted).
+# One entry per case, so the "inverted" mount is a rotation and not the
+# reflection a flip-then-rotate composes to: a reflection reverses
+# chirality, and text on the panel would read backwards.
+_TRANSPOSE: dict[tuple[Orientation, bool], Image.Transpose | None] = {
+    (Orientation.LANDSCAPE, False): Image.Transpose.ROTATE_270,
+    (Orientation.LANDSCAPE, True): Image.Transpose.ROTATE_90,
+    (Orientation.PORTRAIT, False): None,
+    (Orientation.PORTRAIT, True): Image.Transpose.ROTATE_180,
+}
 
 
 class _Rect(NamedTuple):
@@ -113,64 +131,59 @@ class AKP02:
     VENDOR_ID = 0x0300
     PRODUCT_ID = 0x3017
 
-    SCREEN_WIDTH = 1920
-    SCREEN_HEIGHT = 462
+    # Named for the glass, not for an orientation: which one is "width"
+    # depends on the mode, but the strip is 1920 along its long edge
+    # however you hang it. The buffer sent is always SHORT x LONG.
+    # _screen_size() is what gives the caller's width and height.
+    PANEL_LONG_SIDE = 1920
+    PANEL_SHORT_SIDE = 462
 
     HID_REPORT_SIZE = 1024  # EP1 OUT wMaxPacketSize from the device descriptor
     INPUT_REPORT_SIZE = 512  # EP2 IN wMaxPacketSize
     JPEG_QUALITY = 85  # default; override per instance via __init__
     JPEG_QUALITY_MIN = 1
-    JPEG_QUALITY_MAX = 95  # Pillow advises <= 95; above it, size grows for
-    # almost no visual gain
+    # Pillow advises <= 95; above it, size grows for almost no visual gain.
+    JPEG_QUALITY_MAX = 95
     BRIGHTNESS_MIN = 0  # range of the LIG command's parameter byte
     BRIGHTNESS_MAX = 100
 
-    # A region update sent immediately after a full-frame draw can fail
-    # to render the full frame at all (confirmed on real hardware: 4ms
-    # was found sufficient, 0ms fails). Region-after-region and
-    # full-after-full both need no delay at all -- only this one specific
-    # transition does. Likely cause: a full-frame draw is a clean buffer
-    # replace, but a region draw is a read-modify-write against whatever's
-    # currently in the framebuffer; if that read starts before the
-    # previous full-frame commit has actually finished settling internally
-    # (not just "USB bytes received"), the in-flight commit can apparently
-    # get corrupted/aborted. 20ms is used here (5x the confirmed-working
-    # 4ms) for margin against real-world timing jitter -- this delay only
-    # ever fires once per full-frame draw, not per region update, so
-    # there's no real cost to being generous with it.
+    # A region update sent immediately after a full-frame draw can stop
+    # the full frame rendering at all (confirmed on real hardware: 4ms
+    # suffices, 0ms fails). Only this transition needs it --
+    # region-after-region and full-after-full do not. Likely cause: a
+    # full draw is a clean buffer replace, but a region is a
+    # read-modify-write against the framebuffer; if that read starts
+    # before the previous commit has finished settling internally (not
+    # just "USB bytes received"), the in-flight commit can get
+    # corrupted. 20ms here (5x the confirmed 4ms) for jitter margin; it
+    # fires once per full-frame draw, not per region, so being generous
+    # costs nothing.
     FULL_TO_REGION_SETTLE_SEC = 0.02
 
     # Confirmed on real hardware: a region update renders with the wrong
-    # color unless the position value that actually lands in the CRTDRA
-    # header's x field (== SCREEN_HEIGHT - y - height, see
-    # _to_portrait_rect) satisfies this residue mod this modulus. Root
-    # cause understood, not just observed: SCREEN_HEIGHT (462) does not
-    # divide evenly into 8- or 16-pixel JPEG blocks the way SCREEN_WIDTH
-    # (1920) does, so the device's firmware evidently pads/rounds its
-    # buffer on that axis with a fixed internal offset. Landscape x
-    # (which maps to the cleanly-tiling 1920-pixel portrait axis) shows
-    # no equivalent sensitivity -- confirmed by testing it directly.
-    # show() corrects this automatically (see _align_region_y); these
-    # constants exist to make that correction's target explicit rather
-    # than a magic number, and so a future finding can update it in one
-    # place.
-    PORTRAIT_X_ALIGN_MODULUS = 8
-    PORTRAIT_X_ALIGN_RESIDUE = 2
+    # color unless whatever lands in the CRTDRA header's x field
+    # satisfies this residue mod this modulus. Root cause understood,
+    # not just observed: 462 does not divide evenly into 8- or 16-pixel
+    # JPEG blocks the way 1920 does, so the firmware evidently
+    # pads/rounds its buffer on that axis with a fixed internal offset.
+    # The 1920-pixel axis shows no equivalent sensitivity -- confirmed by
+    # testing it directly.
+    #
+    # A property of the buffer, not of the caller's coordinates: the rule
+    # binds whichever coordinate _to_buffer_rect maps into the header's
+    # x, which is y in landscape and x in portrait, running with or
+    # against it depending on `inverted`. show() corrects this
+    # automatically (see _align_axis); the constants exist so the target
+    # is explicit and updatable in one place.
+    SHORT_AXIS_ALIGN_MODULUS = 8
+    SHORT_AXIS_ALIGN_RESIDUE = 2
 
     CMD_SCREEN_OFF = b"HAN"
     CMD_SCREEN_ON = b"DIS"
     CMD_BRIGHTNESS = b"LIG"  # + 1 param byte, 0-100
     CMD_HEARTBEAT = b"CONNECT"  # device sleeps without periodic heartbeats
     CMD_COMMIT = b"STP"  # render buffered image data
-    CMD_BOOT_ORIENTATION = b"SET"  # + 0x00 + orientation byte, see below
-
-    # Confirmed on real hardware: sets the panel orientation immediately
-    # AND persists it as the boot-time default (survives a power cycle --
-    # verified by physically unplugging/replugging after setting each
-    # value). One command does both; there's no separate "apply now" vs
-    # "save as default" step.
-    ORIENTATION_HORIZONTAL = 0x00
-    ORIENTATION_VERTICAL = 0x01
+    CMD_BOOT_ORIENTATION = b"SET"  # + 0x00 + Orientation value
 
     # Well inside the device's sleep timeout, with room for a missed beat.
     KEEPALIVE_INTERVAL_SEC = 5.0
@@ -193,6 +206,13 @@ class AKP02:
         recorded here -- no thread is started by __init__ (see
         __enter__).
 
+        The display mode starts at Orientation.LANDSCAPE; read or change
+        it with orientation(). Nothing is sent to the device here.
+
+        inverted (default False, set on the instance after construction)
+        turns the image a further 180 degrees, for a panel mounted the
+        other way up. Software only; no hardware command (see show()).
+
         Raises DeviceNotFoundError if the panel isn't connected.
         """
         if (
@@ -209,6 +229,9 @@ class AKP02:
         self.jpeg_quality: int = (
             self.JPEG_QUALITY if jpeg_quality is None else jpeg_quality
         )
+        self._orientation: Orientation = Orientation.LANDSCAPE
+        # Extra 180-degree rotation for an inverted mount (see show()).
+        self.inverted: bool = False
         self._dev: _HidDevice | None = dev if dev is not None else self._open()
         self._lock = threading.Lock()
         # Guards _keepalive_thread/_keepalive_stop management only. Separate
@@ -290,8 +313,12 @@ class AKP02:
         could never be collected, and would keep writing), a subclass
         would see heartbeats before its own __init__ finished, and a
         dev= test double would get a background writer just by being
-        constructed. This is also where the panel is actually in use,
-        and it pairs with __exit__ -> close() -> stop_keepalive().
+        constructed. It also pairs with __exit__ -> close().
+
+        No SET is sent here: the splash orientation is persisted device
+        state, so pushing this instance's default at every `with` would
+        overwrite a setting the caller never mentioned. It is
+        orientation()'s to send, once.
         """
         if self._keepalive_interval is not None:
             self.start_keepalive(self._keepalive_interval)
@@ -418,27 +445,44 @@ class AKP02:
         with self._lock:
             self._send_command(self.CMD_HEARTBEAT)
 
-    def set_boot_orientation(self, orientation: str) -> None:
-        """Set the panel orientation ("horizontal" or "vertical").
+    def orientation(self, mode: Orientation | None = None) -> Orientation:
+        """Get, or set, the display mode.
 
-        Takes effect on the live display immediately, and persists as
-        the boot-time default surviving a power cycle. Confirmed on
-        real hardware: byte layout is "CRT" + 00,00 + "SET" + 00,00 +
-        0x00 + orientation byte, following the standard 2-byte-gap
-        command pattern (unlike CLE/VER's exceptions).
+        With no argument, returns the current Orientation and touches
+        nothing. With one, show() renders for it from the next call, and
+        SET is sent under the lock so the device's splash matches -- that
+        is the command's only effect (see the Orientation docstring).
+        Wire layout is "CRT" + 00,00 + "SET" + 00,00 + 0x00 + value, the
+        standard 2-byte-gap pattern (unlike CLE/VER's exceptions).
+
+        Set panel.inverted directly for an upside-down mount; it is
+        software only, so it needs no method.
+
+        Returns the current Orientation in every case.
         """
-        values = {
-            "horizontal": self.ORIENTATION_HORIZONTAL,
-            "vertical": self.ORIENTATION_VERTICAL,
-        }
-        if orientation not in values:
+        if mode is None:
+            return self._orientation
+        if not isinstance(mode, Orientation):
             raise ValueError(
-                f"orientation must be 'horizontal' or 'vertical', got {orientation!r}"
+                f"mode must be an Orientation member (LANDSCAPE or "
+                f"PORTRAIT), got {mode!r}"
             )
         with self._lock:
-            self._send_command(
-                self.CMD_BOOT_ORIENTATION, bytes([0x00, values[orientation]])
-            )
+            # Sent first: a failed write must not leave the host rendering
+            # for a mode the caller was told did not take.
+            self._send_command(self.CMD_BOOT_ORIENTATION, bytes([0x00, mode.value]))
+            self._orientation = mode
+        return mode
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """(width, height) the caller draws at, for the current mode.
+
+        Handy as Image.new("RGB", panel.size), which stays right across
+        an orientation() change. `inverted` does not affect it: a
+        180-degree turn does not change the surface's shape.
+        """
+        return self._screen_size()
 
     def clear(self) -> None:
         """Clear the screen ("CLE").
@@ -487,93 +531,108 @@ class AKP02:
 
     # -- images --
 
-    def _align_region_y(self, y: int, height: int) -> int:
-        """Nudge y to satisfy the color-alignment rule.
+    def _screen_size(self, orientation: Orientation | None = None) -> tuple[int, int]:
+        """(width, height) of the caller's space for an orientation.
 
-        See PORTRAIT_X_ALIGN_MODULUS/RESIDUE for the rule itself. Tries
-        both directions (shift the region up or down in landscape
-        space) and prefers whichever is the smaller shift, falling back
-        to the other direction if the preferred one would push the
-        region outside the panel. Warns whenever a correction is applied
-        -- callers who need exact, unshifted positioning can see this in
-        their logs and adjust the region they ask for. If neither
-        direction fits (the region already spans nearly the whole
-        height), warns and returns y unchanged rather than raising --
-        an occasional color glitch is a smaller failure than refusing to
-        draw at all. Returns y unchanged, with no warning, if it's
-        already aligned.
-
-        Confirmed on real hardware: height == SCREEN_HEIGHT (a region
-        spanning the full short axis, which can only ever sit at y=0)
-        needs no correction and gets none, silently -- consistent with
-        our understanding of the underlying bug, since a region with no
-        partial remainder on this axis leaves nothing for the device's
-        edge-padding logic to misalign in the first place. Without this,
-        the "can't find a valid shift" fallback above would still avoid
-        touching y (there's no room to shift when height fills the
-        whole axis), but would incorrectly warn every time regardless.
+        Landscape is the 1920x462 the panel is sold as; portrait is the
+        same glass turned 90 degrees, so the caller sees 462x1920. The
+        JPEG sent is 462x1920 either way -- only the caller's view
+        changes.
         """
-        if height == self.SCREEN_HEIGHT:
-            return y
+        # Not `orientation or self._orientation`: Orientation.LANDSCAPE
+        # is 0x00, i.e. falsy as an IntEnum.
+        mode = orientation if orientation is not None else self._orientation
+        if mode is Orientation.PORTRAIT:
+            return self.PANEL_SHORT_SIDE, self.PANEL_LONG_SIDE
+        return self.PANEL_LONG_SIDE, self.PANEL_SHORT_SIDE
 
-        portrait_x = self.SCREEN_HEIGHT - y - height
-        residue = portrait_x % self.PORTRAIT_X_ALIGN_MODULUS
-        if residue == self.PORTRAIT_X_ALIGN_RESIDUE:
-            return y
+    def _align_axis(self, value: int, extent: int, axis: str, reflected: bool) -> int:
+        """Nudge `value` so the header's x field satisfies the color rule.
 
-        # Shifting y UP by `up_shift` decreases portrait_x by the same
-        # amount (portrait_x = SCREEN_HEIGHT - y - height) -- solve for
-        # the smallest non-negative up_shift reaching the target residue,
-        # and its complementary down_shift reaching the same residue the
-        # other way.
-        up_shift = (
-            residue - self.PORTRAIT_X_ALIGN_RESIDUE
-        ) % self.PORTRAIT_X_ALIGN_MODULUS
-        down_shift = self.PORTRAIT_X_ALIGN_MODULUS - up_shift
+        `value` is the caller's coordinate on the 462-px axis;
+        `reflected` says whether it reaches the header against
+        (462 - value - extent) or with it. See SHORT_AXIS_ALIGN_* for
+        the rule.
 
-        def fits(candidate: int) -> bool:
-            return candidate >= 0 and candidate + height <= self.SCREEN_HEIGHT
+        Prefers the smaller shift, falls back to the other direction if
+        the preferred one leaves the panel, ties to the smaller
+        coordinate. Warns on every correction, and warns and returns
+        unchanged if neither fits: an occasional color glitch beats
+        refusing to draw.
 
-        for _shift, candidate_y in sorted(
-            [(up_shift, y + up_shift), (down_shift, y - down_shift)]
+        Confirmed on real hardware: a region spanning the whole axis
+        (extent == PANEL_SHORT_SIDE, so it can only sit at 0) needs no
+        correction -- with no partial remainder there is nothing for the
+        device's edge-padding to misalign. Without the check the search
+        below would leave it alone anyway, but warn every time.
+        """
+        if extent == self.PANEL_SHORT_SIDE:
+            return value
+
+        header_x = (self.PANEL_SHORT_SIDE - value - extent) if reflected else value
+        residue = header_x % self.SHORT_AXIS_ALIGN_MODULUS
+        if residue == self.SHORT_AXIS_ALIGN_RESIDUE:
+            return value
+
+        # Solve in header space, then step `value` back through the sign
+        # `reflected` implies.
+        sign = -1 if reflected else 1
+        plus = (self.SHORT_AXIS_ALIGN_RESIDUE - residue) % self.SHORT_AXIS_ALIGN_MODULUS
+        for _shift, candidate in sorted(
+            (abs(s), value + sign * s)
+            for s in (plus, plus - self.SHORT_AXIS_ALIGN_MODULUS)
         ):
-            if fits(candidate_y):
+            if candidate >= 0 and candidate + extent <= self.PANEL_SHORT_SIDE:
                 warnings.warn(
-                    f"akp02: region y={y} shifted to y={candidate_y} "
-                    f"(height={height}) for correct color rendering -- see "
-                    f"AKP02.PORTRAIT_X_ALIGN_MODULUS/PORTRAIT_X_ALIGN_RESIDUE",
+                    f"akp02: region {axis}={value} shifted to "
+                    f"{axis}={candidate} (extent={extent}) for correct color "
+                    f"rendering -- see AKP02."
+                    f"SHORT_AXIS_ALIGN_MODULUS/SHORT_AXIS_ALIGN_RESIDUE",
                     stacklevel=3,
                 )
-                return candidate_y
+                return candidate
 
         warnings.warn(
-            f"akp02: region y={y} (height={height}) cannot be shifted to a "
-            f"color-safe position without leaving the panel -- drawing "
-            f"uncorrected; this region's color may render incorrectly",
+            f"akp02: region {axis}={value} (extent={extent}) cannot be "
+            f"shifted to a color-safe position without leaving the panel -- "
+            f"drawing uncorrected; this region's color may render incorrectly",
             stacklevel=3,
         )
-        return y
+        return value
 
-    def _to_portrait_rect(self, x: int, y: int, width: int, height: int) -> _Rect:
-        """Map a rect from landscape space to the portrait buffer space.
+    def _to_buffer_rect(
+        self,
+        rect: _Rect,
+        orientation: Orientation,
+        inverted: bool,
+    ) -> _Rect:
+        """Map a rect from the caller's space into the portrait buffer.
 
-        Follows the clockwise rotation used for full frames:
-        (x, y) -> (H-1-y, x), applied to the rect's bounding box; width
-        and height swap.
-
-        This must stay in step with the transpose in show(): the two are
-        descriptions of the same mapping, and changing one alone leaves
-        full frames looking correct while silently misplacing every
-        region update.
+        Puts the rect through exactly the net rotation _TRANSPOSE applies
+        to the pixels, so a region lands where the full frame would put
+        it. Changing one without the other leaves full frames looking
+        correct while silently misplacing every region.
         """
-        return _Rect(x=self.SCREEN_HEIGHT - y - height, y=x, width=height, height=width)
+        x, y, width, height = rect
+        screen_w, screen_h = self._screen_size(orientation)
+        if orientation is Orientation.LANDSCAPE:
+            # ROTATE_270, or ROTATE_90 when inverted.
+            if inverted:
+                return _Rect(y, screen_w - x - width, height, width)
+            return _Rect(screen_h - y - height, x, height, width)
+        # Portrait is the buffer's own space: identity, or ROTATE_180.
+        if inverted:
+            return _Rect(screen_w - x - width, screen_h - y - height, width, height)
+        return _Rect(x, y, width, height)
 
-    def _letterbox(self, img: Image.Image) -> Image.Image:
-        """Scale an image to fit the panel, preserving aspect ratio.
+    def _letterbox(
+        self, img: Image.Image, orientation: Orientation | None = None
+    ) -> Image.Image:
+        """Scale to fit the mode's screen size, preserving aspect ratio.
 
-        The result is centered on a black canvas of the panel's size.
+        Centered on a black canvas of that size.
         """
-        w, h = self.SCREEN_WIDTH, self.SCREEN_HEIGHT
+        w, h = self._screen_size(orientation)
         scale = min(w / img.width, h / img.height)
         new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
@@ -592,22 +651,27 @@ class AKP02:
     ) -> None:
         """Display an image on the panel.
 
-        Accepts a landscape PIL image, or ready portrait JPEG bytes
-        (sent untouched; full-screen only).
+        Accepts a PIL image in the panel's active mode (orientation() --
+        LANDSCAPE: 1920x462 space, PORTRAIT: 462x1920 space), or ready
+        JPEG bytes of the 462x1920 portrait buffer (sent untouched;
+        full-screen only).
 
-        at=None: full-screen, letterboxed if not exactly the panel size.
-        at=(x, y): partial update at that landscape position, sized by the
-        image; the rest of the screen is preserved. The device renders a
-        region's color wrong unless its position satisfies a confirmed
-        alignment requirement (see PORTRAIT_X_ALIGN_MODULUS/RESIDUE) --
-        this is corrected automatically, nudging y by a few pixels and
-        warning when it does. Only y is ever adjusted; the position you
-        pass for x, and the image's size, are never changed.
+        at=None: full-screen, letterboxed if not exactly that size.
+        at=(x, y): partial update there, sized by the image; the rest of
+        the screen is preserved. The device renders a region's color
+        wrong unless the value landing in the header's x field satisfies
+        a confirmed alignment requirement (see SHORT_AXIS_ALIGN_*); this
+        is corrected automatically, nudging by a few pixels along the
+        462-px axis -- y in landscape, x in portrait -- and warning when
+        it does. The other coordinate and the size never change.
 
-        PIL input gets the protocol's mandatory 90-degree clockwise
-        rotation and is JPEG-encoded (before the lock, so the keepalive
-        thread isn't blocked); the lock then holds for the whole header +
-        chunks + commit sequence so no report can interleave.
+        PIL input is JPEG-encoded before the lock, so the keepalive
+        thread isn't blocked. It first gets the one net rotation its
+        mode calls for (_TRANSPOSE), and a region's rect goes through
+        the same rotation, so it lands where the full frame would put
+        it. Raw JPEG bytes are never transformed. The lock then holds
+        for the whole header + chunks + commit sequence so no report can
+        interleave.
 
         A region update sent immediately after a full-frame draw needs a
         brief settling delay first, or the full frame can fail to render
@@ -616,27 +680,42 @@ class AKP02:
         """
         is_region = at is not None
         rect = _FULL_SCREEN
+        # Snapshotted once: every geometry decision below has to come from
+        # the same state, or a concurrent orientation() could rotate the
+        # pixels one way and place their rect the other.
+        orientation, inverted = self._orientation, bool(self.inverted)
+        screen_w, screen_h = self._screen_size(orientation)
         if isinstance(image, Image.Image):
             img = image if image.mode == "RGB" else image.convert("RGB")
             if at is None:
-                if img.size != (self.SCREEN_WIDTH, self.SCREEN_HEIGHT):
-                    img = self._letterbox(img)
+                if img.size != (screen_w, screen_h):
+                    img = self._letterbox(img, orientation)
             else:
                 x, y = at
                 if (
                     x < 0
                     or y < 0
-                    or x + img.width > self.SCREEN_WIDTH
-                    or y + img.height > self.SCREEN_HEIGHT
+                    or x + img.width > screen_w
+                    or y + img.height > screen_h
                 ):
                     raise ValueError(
                         f"region ({x},{y},{img.width}x{img.height}) does not "
-                        f"fit the {self.SCREEN_WIDTH}x{self.SCREEN_HEIGHT} screen"
+                        f"fit the {screen_w}x{screen_h} screen"
                     )
-                y = self._align_region_y(y, img.height)
-                rect = self._to_portrait_rect(x, y, img.width, img.height)
-            # transpose() (exact permutation) rather than rotate()
-            img = img.transpose(Image.Transpose.ROTATE_270)
+                # Which coordinate reaches the header's x field, and
+                # whether it runs with or against it, both follow from
+                # the net rotation below.
+                if orientation is Orientation.LANDSCAPE:
+                    y = self._align_axis(y, img.height, "y", reflected=not inverted)
+                else:
+                    x = self._align_axis(x, img.width, "x", reflected=inverted)
+                rect = self._to_buffer_rect(
+                    _Rect(x, y, img.width, img.height), orientation, inverted
+                )
+            # transpose() (an exact permutation) rather than rotate().
+            transpose = _TRANSPOSE[(orientation, inverted)]
+            if transpose is not None:
+                img = img.transpose(transpose)
             jpeg = self._encode_jpeg(img)
         else:
             if at is not None:
