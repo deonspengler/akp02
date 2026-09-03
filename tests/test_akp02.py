@@ -1046,7 +1046,8 @@ class TestImageHandling:
 # against the library's own arithmetic.
 # ---------------------------------------------------------------------
 
-COMBOS = [(o, i) for o in (LANDSCAPE, PORTRAIT) for i in (False, True)]
+ORIENTATIONS = (LANDSCAPE, PORTRAIT)
+COMBOS = [(o, i) for o in ORIENTATIONS for i in (False, True)]
 DIHEDRAL = {
     "identity": None,
     "ROTATE_90": Image.Transpose.ROTATE_90,
@@ -1117,13 +1118,16 @@ class TestOrientationGeometry:
         assert name == expected
         assert name not in REFLECTIONS
 
-    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    @pytest.mark.parametrize("orientation", ORIENTATIONS)
     def test_inverted_is_the_upright_frame_seen_upside_down(
-            self, make_panel, orientation, inverted):
+            self, make_panel, orientation):
         # The property a user actually cares about: walk around the panel
         # and you see the same picture, not a mirrored one.
-        if not inverted:
-            pytest.skip("checked from the inverted side of the pair")
+        #
+        # Both sides of the pair are built here, so `inverted` is the
+        # subject of the comparison rather than an input to it.
+        # Parametrizing over it as well would run each orientation twice
+        # to do the same work once.
         up_dev, inv_dev = FakeDevice(), FakeDevice()
         up = _configured(make_panel, up_dev, orientation, False)
         inv = _configured(make_panel, inv_dev, orientation, True)
