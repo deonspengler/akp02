@@ -199,13 +199,13 @@ pip install -e ".[test]"
 pytest
 ```
 
-146 tests, 100% line and branch coverage, run entirely against a fake
-HID device -- no physical hardware or `hidapi` installation required.
-Covers protocol byte-exactness pinned against real captures, the
-region color-alignment correction with real hardware-confirmed data
-points, and concurrency behavior: dead-thread recovery after a
-disconnect, bounded shutdown against a wedged device, and
-lock-interleaving prevention verified under real contention.
+The suite runs entirely against a fake HID device -- no physical
+hardware or `hidapi` installation required -- and holds the library at
+100% line and branch coverage. It covers protocol byte-exactness pinned
+against real captures, the region color-alignment correction with real
+hardware-confirmed data points, and concurrency behavior: dead-thread
+recovery after a disconnect, bounded shutdown against a wedged device,
+and lock-interleaving prevention verified under real contention.
 
 The orientation geometry is checked against Pillow and against the full
 frame rather than against the library's own arithmetic: for each of the
