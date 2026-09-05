@@ -40,7 +40,7 @@ __all__ = ["AKP02", "DeviceNotFoundError", "Orientation"]
 # Single source of truth: pyproject declares `dynamic = ["version"]` and
 # hatchling reads this line at build time, so there is no second copy to
 # forget to bump.
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 class Orientation(IntEnum):
@@ -150,6 +150,7 @@ class AKP02:
         "_orientation",
         "inverted",
         "jpeg_quality",
+        "jpeg_subsampling",
     )
 
     VENDOR_ID = 0x0300
@@ -168,6 +169,16 @@ class AKP02:
     JPEG_QUALITY_MIN = 1
     # Pillow advises <= 95; above it, size grows for almost no visual gain.
     JPEG_QUALITY_MAX = 95
+    # Chroma subsampling. -1 leaves the choice to libjpeg, which picks
+    # 4:2:0 at these qualities, and is the default so the bytes this
+    # library sends do not change. 0 (4:4:4) is worth setting for small
+    # colored text, which 4:2:0 visibly smears: measured on text-on-dark
+    # content, roughly a third of the error for a third more bytes. Not
+    # confirmed against the panel's own JPEG decoder -- unlike most
+    # things here, so try it on hardware before relying on it.
+    # Pillow accepts out-of-range ints silently, hence the explicit set.
+    JPEG_SUBSAMPLING = -1
+    JPEG_SUBSAMPLING_VALUES = (-1, 0, 1, 2)  # -1 auto, 4:4:4, 4:2:2, 4:2:0
     BRIGHTNESS_MIN = 0  # range of the LIG command's parameter byte
     BRIGHTNESS_MAX = 100
     # The device's factory default: observed on real hardware to revert
@@ -221,13 +232,19 @@ class AKP02:
         dev: _HidDevice | None = None,
         jpeg_quality: int | None = None,
         keepalive_interval: float | None = KEEPALIVE_INTERVAL_SEC,
+        *,
+        jpeg_subsampling: int | None = None,
     ) -> None:
         """Open the panel.
 
         Pass an already-open hidapi device (or any _HidDevice-shaped
         object, e.g. a test double) via dev to skip discovery.
         jpeg_quality (1-95) overrides the default encoding quality --
-        small text UIs may want it higher.
+        small text UIs may want it higher. jpeg_subsampling picks the
+        chroma subsampling (JPEG_SUBSAMPLING_VALUES): 0 is 4:4:4, which
+        keeps small colored text sharp where the default smears it, for
+        about a third more bytes. Keyword-only and last in the signature
+        so no existing positional call shifts.
 
         keepalive_interval is the interval in seconds __enter__ starts
         the keepalive thread with, or None to not start one. Only
@@ -250,12 +267,24 @@ class AKP02:
             raise ValueError(
                 f"jpeg_quality must be {self.JPEG_QUALITY_MIN}-{self.JPEG_QUALITY_MAX}"
             )
+        if (
+            jpeg_subsampling is not None
+            and jpeg_subsampling not in self.JPEG_SUBSAMPLING_VALUES
+        ):
+            raise ValueError(
+                f"jpeg_subsampling must be one of "
+                f"{self.JPEG_SUBSAMPLING_VALUES} (-1 libjpeg's own choice, "
+                f"0 = 4:4:4, 1 = 4:2:2, 2 = 4:2:0), got {jpeg_subsampling!r}"
+            )
         # Checked here too, so the traceback points at the construction
         # site rather than at __enter__.
         if keepalive_interval is not None:
             self._check_keepalive_interval(keepalive_interval)
         self.jpeg_quality: int = (
             self.JPEG_QUALITY if jpeg_quality is None else jpeg_quality
+        )
+        self.jpeg_subsampling: int = (
+            self.JPEG_SUBSAMPLING if jpeg_subsampling is None else jpeg_subsampling
         )
         self._orientation: Orientation = Orientation.LANDSCAPE
         # Tracks the last host-requested brightness so screen_on() can
@@ -758,9 +787,14 @@ class AKP02:
         return canvas
 
     def _encode_jpeg(self, img: Image.Image) -> bytes:
-        """JPEG-encode at the instance's quality (see show())."""
+        """JPEG-encode at the instance's quality and subsampling."""
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=self.jpeg_quality)
+        img.save(
+            buf,
+            format="JPEG",
+            quality=self.jpeg_quality,
+            subsampling=self.jpeg_subsampling,
+        )
         return buf.getvalue()
 
     def encode_region(self, image: Image.Image) -> bytes:

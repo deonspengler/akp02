@@ -498,6 +498,30 @@ class TestValidation:
     def test_jpeg_quality_defaults(self, panel):
         assert panel.jpeg_quality == AKP02.JPEG_QUALITY
 
+    @pytest.mark.parametrize("value", [3, -2, 100, "4:4:4"])
+    def test_jpeg_subsampling_rejects_unknown_values(self, make_panel,
+                                                     fake_dev, value):
+        # Pillow takes an out-of-range int without complaint and quietly
+        # falls back, so an unchecked typo would look like it worked.
+        with pytest.raises(ValueError, match="jpeg_subsampling"):
+            make_panel(fake_dev, jpeg_subsampling=value)
+
+    @pytest.mark.parametrize("value", AKP02.JPEG_SUBSAMPLING_VALUES)
+    def test_jpeg_subsampling_accepts_every_documented_value(
+            self, make_panel, fake_dev, value):
+        panel = make_panel(fake_dev, jpeg_subsampling=value)
+        assert panel.jpeg_subsampling == value
+        panel.show(Image.new("RGB", (1920, 462)))  # reaches the encoder
+
+    def test_jpeg_subsampling_defaults(self, panel):
+        assert panel.jpeg_subsampling == AKP02.JPEG_SUBSAMPLING
+
+    def test_jpeg_subsampling_is_keyword_only(self, fake_dev):
+        # It sits last and keyword-only so that adding it could not shift
+        # an existing positional call onto the wrong parameter.
+        with pytest.raises(TypeError):
+            AKP02(fake_dev, 85, 5.0, 0)
+
     @pytest.mark.parametrize("at", [
         (1900, 50),           # overflows the right edge
         (50, 400),            # overflows the bottom edge
@@ -1127,6 +1151,36 @@ class TestImageHandling:
             make_panel(dev, jpeg_quality=quality).show(img)
             sizes.append(len(payload_of(dev.writes[:-1])[1]))
         assert sizes[0] < sizes[1], "jpeg_quality is not reaching the encoder"
+
+    def test_jpeg_subsampling_affects_the_encoded_payload(self, make_panel):
+        # Subsampling acts on chroma, so the scene needs high-frequency
+        # color: effect_noise is luma-only and would barely separate the
+        # two. A one-pixel red/blue checker is the extreme case.
+        img = Image.new("RGB", (1920, 462))
+        pixels = img.load()
+        for x in range(img.width):
+            for y in range(img.height):
+                pixels[x, y] = (255, 0, 0) if (x + y) % 2 else (0, 0, 255)
+        sizes = []
+        for value in (2, 0):  # 4:2:0, then 4:4:4
+            dev = FakeDevice()
+            make_panel(dev, jpeg_subsampling=value).show(img)
+            sizes.append(len(payload_of(dev.writes[:-1])[1]))
+        assert sizes[0] < sizes[1], \
+            "jpeg_subsampling is not reaching the encoder"
+
+    def test_default_subsampling_leaves_the_payload_byte_identical(
+            self, panel, fake_dev):
+        # The knob is opt-in: the default must be exactly what Pillow
+        # would have produced before it existed, or every frame this
+        # library has ever sent silently changes.
+        img = _asymmetric_scene((1920, 462))
+        panel.show(img)
+        _, sent = payload_of(fake_dev.writes[:-1])
+        buf = io.BytesIO()
+        img.transpose(Image.Transpose.ROTATE_270).save(
+            buf, format="JPEG", quality=AKP02.JPEG_QUALITY)
+        assert sent == buf.getvalue()
 
     def test_source_image_is_not_mutated(self, panel):
         # Callers commonly re-show a cached frame; rotating or converting
