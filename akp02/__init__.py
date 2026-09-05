@@ -40,7 +40,7 @@ __all__ = ["AKP02", "DeviceNotFoundError", "Orientation"]
 # Single source of truth: pyproject declares `dynamic = ["version"]` and
 # hatchling reads this line at build time, so there is no second copy to
 # forget to bump.
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 class Orientation(IntEnum):
@@ -621,7 +621,8 @@ class AKP02:
         the preferred one leaves the panel, ties to the smaller
         coordinate. Warns on every correction, and warns and returns
         unchanged if neither fits: an occasional color glitch beats
-        refusing to draw.
+        refusing to draw. stacklevel=4 on both: the only caller is
+        _region_rect, which show() calls, so that is the user's line.
 
         Confirmed on real hardware: a region spanning the whole axis
         (extent == PANEL_SHORT_SIDE, so it can only sit at 0) needs no
@@ -651,7 +652,7 @@ class AKP02:
                     f"{axis}={candidate} (extent={extent}) for correct color "
                     f"rendering -- see AKP02."
                     f"SHORT_AXIS_ALIGN_MODULUS/SHORT_AXIS_ALIGN_RESIDUE",
-                    stacklevel=3,
+                    stacklevel=4,
                 )
                 return candidate
 
@@ -659,7 +660,7 @@ class AKP02:
             f"akp02: region {axis}={value} (extent={extent}) cannot be "
             f"shifted to a color-safe position without leaving the panel -- "
             f"drawing uncorrected; this region's color may render incorrectly",
-            stacklevel=3,
+            stacklevel=4,
         )
         return value
 
@@ -688,6 +689,59 @@ class AKP02:
             return _Rect(screen_w - x - width, screen_h - y - height, width, height)
         return _Rect(x, y, width, height)
 
+    def _region_rect(
+        self,
+        at: tuple[int, int],
+        size: tuple[int, int],
+        orientation: Orientation,
+        inverted: bool,
+    ) -> _Rect:
+        """Bounds-check, align, and map a caller-space region rect.
+
+        Shared by show()'s two paths so cached bytes land in exactly the
+        rect their source image would have -- the same check, the same
+        _align_axis nudge, not merely equivalent ones. `size` is in the
+        caller's space (pre-rotation); the rect comes back in buffer
+        space, so landscape returns it with width and height swapped.
+        """
+        x, y = at
+        width, height = size
+        screen_w, screen_h = self._screen_size(orientation)
+        if x < 0 or y < 0 or x + width > screen_w or y + height > screen_h:
+            raise ValueError(
+                f"region ({x},{y},{width}x{height}) does not "
+                f"fit the {screen_w}x{screen_h} screen"
+            )
+        if orientation is Orientation.LANDSCAPE:
+            y = self._align_axis(y, height, "y", reflected=not inverted)
+        else:
+            x = self._align_axis(x, width, "x", reflected=inverted)
+        return self._to_buffer_rect(_Rect(x, y, width, height), orientation, inverted)
+
+    @staticmethod
+    def _region_size_from_jpeg(
+        jpeg: bytes, orientation: Orientation
+    ) -> tuple[int, int]:
+        """Read a region's caller-space (width, height) from its own bytes.
+
+        Region bytes arrive already rotated into buffer space, so this
+        undoes _to_buffer_rect's axis mapping: landscape swaps the two,
+        portrait is identity, and `inverted` is a 180 that leaves the
+        mapping alone. Deriving rather than being told means the header
+        cannot declare a size the bytes contradict. Image.open() stops
+        at the JPEG header: tens of microseconds, no pixel decoded.
+        """
+        try:
+            with Image.open(io.BytesIO(jpeg)) as probe:
+                fmt, (width, height) = probe.format, probe.size
+        except Exception as exc:
+            raise ValueError(f"region bytes are not a readable image: {exc}") from exc
+        if fmt != "JPEG":
+            raise ValueError(f"region bytes must be JPEG, got {fmt}")
+        if orientation is Orientation.LANDSCAPE:
+            return height, width
+        return width, height
+
     def _letterbox(
         self, img: Image.Image, orientation: Orientation | None = None
     ) -> Image.Image:
@@ -709,15 +763,97 @@ class AKP02:
         img.save(buf, format="JPEG", quality=self.jpeg_quality)
         return buf.getvalue()
 
+    def encode_region(self, image: Image.Image) -> bytes:
+        """Encode a region exactly as show(image, at=...) would send it.
+
+        Push the result with show(jpeg, at=...) as often as you like:
+        the size comes from the bytes, so a cache entry is just
+        (jpeg, at). Unchanged pixels then cost no encode, and encoding
+        can run off the thread that owns the device, since nothing here
+        touches the handle or takes the lock. No full-screen
+        counterpart: show() already letterboxes and encodes that case.
+
+        The bytes carry the rotation the CURRENT orientation and
+        `inverted` imply, so the caller must drop the cache when either
+        changes. show() derives the size from whatever it is handed, so
+        stale bytes are reinterpreted rather than rejected; pass size=
+        to have that caught.
+        """
+        img = image if image.mode == "RGB" else image.convert("RGB")
+        transpose = _TRANSPOSE[(self._orientation, bool(self.inverted))]
+        if transpose is not None:
+            img = img.transpose(transpose)
+        return self._encode_jpeg(img)
+
+    def _prepare_image(
+        self,
+        image: Image.Image,
+        at: tuple[int, int] | None,
+        size: tuple[int, int] | None,
+        orientation: Orientation,
+        inverted: bool,
+    ) -> tuple[bytes, _Rect]:
+        """Fit or place, rotate, and encode a PIL image for show().
+
+        Returns the JPEG and the buffer rect to send it with. Called
+        outside the lock, so the encode does not block the keepalive.
+        """
+        if size is not None:
+            raise ValueError("size= is for raw JPEG bytes; an image has its own")
+        img = image if image.mode == "RGB" else image.convert("RGB")
+        rect = _FULL_SCREEN
+        if at is None:
+            if img.size != self._screen_size(orientation):
+                img = self._letterbox(img, orientation)
+        else:
+            rect = self._region_rect(at, img.size, orientation, inverted)
+        # transpose() (an exact permutation) rather than rotate().
+        transpose = _TRANSPOSE[(orientation, inverted)]
+        if transpose is not None:
+            img = img.transpose(transpose)
+        return self._encode_jpeg(img), rect
+
+    def _prepare_bytes(
+        self,
+        jpeg: bytes,
+        at: tuple[int, int] | None,
+        size: tuple[int, int] | None,
+        orientation: Orientation,
+        inverted: bool,
+    ) -> tuple[bytes, _Rect]:
+        """Place ready JPEG bytes for show(), returning them untouched.
+
+        A region is sized from the JPEG's own header, with size= checked
+        against that when the caller supplied it.
+        """
+        if at is None:
+            if size is not None:
+                raise ValueError("size= requires at=; full-screen bytes are whole")
+            return jpeg, _FULL_SCREEN
+        derived = self._region_size_from_jpeg(jpeg, orientation)
+        if size is not None and tuple(size) != derived:
+            raise ValueError(
+                f"size={size[0]}x{size[1]} disagrees with the region "
+                f"JPEG, which is {derived[0]}x{derived[1]} in the "
+                f"current mode's coordinates; the usual causes are "
+                f"bytes never rotated into buffer space (use "
+                f"encode_region()) and a cache reused after an "
+                f"orientation() change"
+            )
+        return jpeg, self._region_rect(at, derived, orientation, inverted)
+
     def show(
-        self, image: Image.Image | bytes, at: tuple[int, int] | None = None
+        self,
+        image: Image.Image | bytes,
+        at: tuple[int, int] | None = None,
+        size: tuple[int, int] | None = None,
     ) -> None:
         """Display an image on the panel.
 
         Accepts a PIL image in the panel's active mode (orientation() --
         LANDSCAPE: 1920x462 space, PORTRAIT: 462x1920 space), or ready
-        JPEG bytes of the 462x1920 portrait buffer (sent untouched;
-        full-screen only).
+        JPEG bytes of the portrait buffer, sent untouched: the whole
+        462x1920 for a full-screen draw, or one region's worth with at=.
 
         at=None: full-screen, letterboxed if not exactly that size.
         at=(x, y): partial update there, sized by the image; the rest of
@@ -728,12 +864,20 @@ class AKP02:
         462-px axis -- y in landscape, x in portrait -- and warning when
         it does. The other coordinate and the size never change.
 
+        size=(width, height) is optional and only cross-checks: a
+        region's dimensions are read from the JPEG's own header. Pass it
+        to assert the caller-space shape you expect, which is the one
+        thing deriving cannot do -- unrotated or stale bytes look just
+        like correct bytes for a different shape. Produce region bytes
+        with encode_region().
+
         PIL input is JPEG-encoded before the lock, so the keepalive
         thread isn't blocked. It first gets the one net rotation its
         mode calls for (_TRANSPOSE), and a region's rect goes through
         the same rotation, so it lands where the full frame would put
-        it. Raw JPEG bytes are never transformed. The lock then holds
-        for the whole header + chunks + commit sequence so no report can
+        it. Raw JPEG bytes are never transformed, which is why region
+        bytes must arrive already rotated. The lock then holds for the
+        whole header + chunks + commit sequence so no report can
         interleave.
 
         A region update sent immediately after a full-frame draw needs a
@@ -742,48 +886,15 @@ class AKP02:
         applied automatically; callers don't need to do anything.
         """
         is_region = at is not None
-        rect = _FULL_SCREEN
         # Snapshotted once: every geometry decision below has to come from
         # the same state, or a concurrent orientation() could rotate the
         # pixels one way and place their rect the other.
         orientation, inverted = self._orientation, bool(self.inverted)
-        screen_w, screen_h = self._screen_size(orientation)
+        args = (at, size, orientation, inverted)
         if isinstance(image, Image.Image):
-            img = image if image.mode == "RGB" else image.convert("RGB")
-            if at is None:
-                if img.size != (screen_w, screen_h):
-                    img = self._letterbox(img, orientation)
-            else:
-                x, y = at
-                if (
-                    x < 0
-                    or y < 0
-                    or x + img.width > screen_w
-                    or y + img.height > screen_h
-                ):
-                    raise ValueError(
-                        f"region ({x},{y},{img.width}x{img.height}) does not "
-                        f"fit the {screen_w}x{screen_h} screen"
-                    )
-                # Which coordinate reaches the header's x field, and
-                # whether it runs with or against it, both follow from
-                # the net rotation below.
-                if orientation is Orientation.LANDSCAPE:
-                    y = self._align_axis(y, img.height, "y", reflected=not inverted)
-                else:
-                    x = self._align_axis(x, img.width, "x", reflected=inverted)
-                rect = self._to_buffer_rect(
-                    _Rect(x, y, img.width, img.height), orientation, inverted
-                )
-            # transpose() (an exact permutation) rather than rotate().
-            transpose = _TRANSPOSE[(orientation, inverted)]
-            if transpose is not None:
-                img = img.transpose(transpose)
-            jpeg = self._encode_jpeg(img)
+            jpeg, rect = self._prepare_image(image, *args)
         else:
-            if at is not None:
-                raise ValueError("at= requires a PIL image, not raw bytes")
-            jpeg = image
+            jpeg, rect = self._prepare_bytes(image, *args)
         payload = self._crtdra_header(len(jpeg), rect) + jpeg
         with self._lock:
             if is_region and self._last_show_was_full_screen:

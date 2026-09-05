@@ -540,9 +540,46 @@ class TestValidation:
             panel.start_keepalive(interval_sec=0)
         panel.stop_keepalive()
 
-    def test_raw_bytes_with_at_raises(self, panel):
-        with pytest.raises(ValueError):
+    def test_region_bytes_must_be_a_readable_jpeg(self, panel):
+        # Region bytes reach a decoder (their size is read from the JPEG
+        # header), so garbage fails here rather than being handed to the
+        # device to render as noise.
+        with pytest.raises(ValueError, match="not a readable image"):
             panel.show(b"fake jpeg data", at=(0, 0))
+
+    def test_region_bytes_must_be_jpeg_not_merely_an_image(self, panel):
+        # PIL will happily decode a PNG; the device only takes JPEG, and
+        # nothing downstream would say so.
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 200)).save(buf, format="PNG")
+        with pytest.raises(ValueError, match="must be JPEG"):
+            panel.show(buf.getvalue(), at=(0, 0))
+
+    def test_size_is_rejected_for_a_pil_image(self, panel):
+        # size= exists to cross-check bytes against the shape the caller
+        # expects; an image already carries its own, so accepting it here
+        # would create a second, contradictable source.
+        with pytest.raises(ValueError, match="size= is for raw JPEG bytes"):
+            panel.show(Image.new("RGB", (200, 100)), at=(0, 0), size=(200, 100))
+
+    def test_size_without_at_is_rejected(self, panel):
+        # A full-screen transfer is the whole buffer by definition, so a
+        # size= here means the caller believes something untrue.
+        panel_jpeg = panel.encode_region(Image.new("RGB", (200, 100)))
+        with pytest.raises(ValueError, match="size= requires at="):
+            panel.show(panel_jpeg, size=(200, 100))
+
+    def test_size_disagreeing_with_the_bytes_is_rejected(self, panel):
+        jpeg = panel.encode_region(Image.new("RGB", (200, 100)))
+        with pytest.raises(ValueError, match="disagrees with the region"):
+            panel.show(jpeg, at=(0, 0), size=(100, 200))
+
+    def test_region_bytes_are_bounds_checked_like_an_image(self, panel):
+        # The derived size feeds the same _region_rect as the PIL path,
+        # so the bounds check is not something the bytes path can skip.
+        jpeg = panel.encode_region(Image.new("RGB", (200, 100)))
+        with pytest.raises(ValueError, match="does not fit"):
+            panel.show(jpeg, at=(1900, 50))
 
 
 # ---------------------------------------------------------------------
@@ -1338,6 +1375,125 @@ class TestOrientationGeometry:
         with panel:
             pass
         assert fake_dev.writes == []
+
+
+# ---------------------------------------------------------------------
+# Pre-encoded region bytes. encode_region() exists so a caller drawing
+# continuously can encode once and push many times; the whole feature
+# rests on those bytes being indistinguishable from what the PIL path
+# would have sent, so that is what these check -- against the PIL path
+# itself rather than against a recorded expectation.
+# ---------------------------------------------------------------------
+
+class TestRegionBytes:
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    def test_cached_bytes_match_the_pil_path_exactly(
+            self, make_panel, orientation, inverted):
+        # The property the feature stands on: show(encode_region(img), at=)
+        # and show(img, at=) must put identical bytes on the wire -- same
+        # header rect, same alignment correction, same pixels. Compared
+        # report by report, so a divergence anywhere in the transfer
+        # fails here rather than surviving as a subtle rendering bug.
+        size = (462, 1920) if orientation is PORTRAIT else (1920, 462)
+        scene = _asymmetric_scene((200, 100))
+        at = (100, 50)
+
+        pil_dev, bytes_dev = FakeDevice(), FakeDevice()
+        pil = _configured(make_panel, pil_dev, orientation, inverted)
+        cached = _configured(make_panel, bytes_dev, orientation, inverted)
+        assert pil.size == size
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # alignment, asserted elsewhere
+            pil.show(scene, at=at)
+            cached.show(cached.encode_region(scene), at=at)
+
+        assert bytes_dev.writes == pil_dev.writes
+
+    @pytest.mark.parametrize("orientation,inverted", COMBOS)
+    @pytest.mark.parametrize("size", [(200, 100), (100, 100), (462, 60),
+                                      (60, 462), (1, 1)])
+    def test_derived_size_inverts_the_buffer_mapping(
+            self, make_panel, fake_dev, orientation, inverted, size):
+        # Region bytes are already rotated, so their dimensions are the
+        # buffer rect's; the library has to undo that to get back to the
+        # caller's space. Checked by round trip rather than by repeating
+        # the arithmetic the library uses.
+        panel = _configured(make_panel, fake_dev, orientation, inverted)
+        if size[0] > panel.size[0] or size[1] > panel.size[1]:
+            pytest.skip(f"{size} does not fit {panel.size}")
+        jpeg = panel.encode_region(Image.new("RGB", size))
+        assert panel._region_size_from_jpeg(jpeg, orientation) == size
+
+    def test_alignment_correction_applies_to_the_bytes_path(self, panel,
+                                                            fake_dev):
+        # The nudge lives in _region_rect, which both paths call -- but
+        # only because they were deliberately routed through it, so pin
+        # that the bytes path really does get corrected.
+        jpeg = panel.encode_region(Image.new("RGB", (200, 100)))
+        with pytest.warns(UserWarning, match="shifted"):
+            panel.show(jpeg, at=(100, 50))
+        header, _ = payload_of(fake_dev.writes[:-1])
+        x = struct.unpack(">H", header[17:19])[0]
+        assert x % AKP02.SHORT_AXIS_ALIGN_MODULUS == \
+            AKP02.SHORT_AXIS_ALIGN_RESIDUE
+
+    def test_one_encode_serves_repeated_pushes(self, panel, fake_dev):
+        # The point of the feature: pushing an unchanged region again
+        # must cost no encode and produce the same transfer.
+        jpeg = panel.encode_region(_asymmetric_scene((200, 96)))
+        # y+height = 148, 148 % 8 == 4 -- color-aligned, so no correction
+        panel.show(jpeg, at=(100, 52))
+        first = list(fake_dev.writes)
+        fake_dev.writes.clear()
+        panel.show(jpeg, at=(100, 52))
+        assert fake_dev.writes == first
+
+    def test_size_matching_the_bytes_is_accepted(self, panel, fake_dev):
+        # size= is an optional assertion, so the agreeing case has to be
+        # a no-op rather than an extra constraint on the transfer.
+        img = Image.new("RGB", (200, 96), (5, 6, 7))
+        panel.show(panel.encode_region(img), at=(100, 52), size=(200, 96))
+        with_size = list(fake_dev.writes)
+        fake_dev.writes.clear()
+        panel.show(panel.encode_region(img), at=(100, 52))
+        assert fake_dev.writes == with_size
+
+    @pytest.mark.parametrize("mode", ["RGBA", "L", "P"])
+    def test_encode_region_converts_non_rgb(self, panel, mode):
+        # Same conversion show() does -- JPEG cannot encode these, so
+        # without it PIL raises.
+        jpeg = panel.encode_region(Image.new(mode, (200, 96)))
+        assert panel._region_size_from_jpeg(jpeg, LANDSCAPE) == (200, 96)
+
+    def test_encode_region_does_not_mutate_its_source(self, panel):
+        img = Image.new("RGB", (200, 96), (1, 2, 3))
+        panel.encode_region(img)
+        assert img.size == (200, 96) and img.getpixel((0, 0)) == (1, 2, 3)
+
+    def test_encode_region_touches_neither_device_nor_lock(self, panel,
+                                                           fake_dev):
+        # It is documented as safe to call off the thread that owns the
+        # device, which is only true if it does neither.
+        with panel._lock:
+            panel.encode_region(Image.new("RGB", (200, 96)))
+        assert fake_dev.writes == []
+
+    def test_stale_cache_is_reinterpreted_unless_size_is_given(self,
+                                                               make_panel):
+        # The documented limit of deriving: bytes encoded for one mode
+        # look exactly like correct bytes for a differently-shaped region
+        # in another, so show() cannot tell -- only the caller can, via
+        # size=. Pinned so the docstring's claim stays true.
+        panel = make_panel(FakeDevice())
+        stale = panel.encode_region(Image.new("RGB", (200, 60)))
+        panel.orientation(PORTRAIT)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            panel.show(stale, at=(20, 40))          # accepted, as 60x200
+        with pytest.raises(ValueError, match="disagrees with the region"):
+            panel.show(stale, at=(20, 40), size=(200, 60))
+
 
 # ---------------------------------------------------------------------
 # Packaging

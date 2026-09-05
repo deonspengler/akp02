@@ -94,7 +94,16 @@ with AKP02() as panel:
     panel.set_brightness(80)
     panel.show(pil_image)              # full screen, letterboxed if needed
     panel.show(widget, at=(1600, 16))  # partial update, rest preserved
+
+    jpeg = panel.encode_region(widget) # encode once...
+    panel.show(jpeg, at=(1600, 16))    # ...push it as often as you like
 ```
+
+`encode_region()` returns the bytes `show()` would have sent, so a region
+whose pixels haven't changed costs no re-encode; the size is read from the
+JPEG itself, making a cache entry just `(jpeg, at)`. Re-encode after an
+`orientation()` or `inverted` change -- stale bytes are reinterpreted, not
+rejected.
 
 `AKP02()` raises `DeviceNotFoundError` if the panel isn't connected; the
 message lists what was on the bus instead.
