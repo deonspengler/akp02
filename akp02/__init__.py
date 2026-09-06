@@ -4,22 +4,19 @@ The device sleeps without heartbeats, so `with` starts a keepalive
 thread by default; AKP02(keepalive_interval=None) leaves it to the
 caller.
 
-By default the panel runs in the landscape (1920x462) layout it is
-sold as: show() takes landscape input, rotates it into the 462x1920
-portrait buffer the device expects, and treats at=(x, y) as landscape
-coordinates. panel.orientation(Orientation.PORTRAIT) switches it to
-portrait (462x1920), after which show() takes portrait input unrotated
-and at=(x, y) as buffer coordinates. Setting panel.inverted turns
-either mode a further 180 degrees, for a panel mounted the other way
-up. The JPEG sent is 462x1920 in every case (see show()).
+The panel defaults to the landscape (1920x462) layout it is sold as:
+show() takes landscape input and at=(x, y) as landscape coordinates,
+rotating into the 462x1920 portrait buffer the device expects.
+orientation(Orientation.PORTRAIT) switches to portrait (462x1920),
+where input and coordinates are buffer space and unrotated. Setting
+panel.inverted turns either mode a further 180 degrees, for a panel
+mounted the other way up. The JPEG sent is 462x1920 in every case.
 
 Protocol (reverse-engineered; details in the README, "Protocol notes
 (reverse engineered)"): commands are "CRT" + 00 00 + <mnemonic> +
 00 00 + <params> (AKP02.CMD_* for the mnemonics), and image transfers
 are a 32-byte CRTDRA header (AKP02._crtdra_header) + JPEG, chunked
-into 1024-byte reports, then a commit (STP). The JPEG is always
-462x1920 PORTRAIT; landscape's 90 degrees clockwise is the
-hardware-confirmed rotation.
+into 1024-byte reports, then a commit (STP).
 """
 
 from __future__ import annotations
@@ -37,26 +34,23 @@ from PIL import Image
 
 __all__ = ["AKP02", "DeviceNotFoundError", "Orientation"]
 
-# Single source of truth: pyproject declares `dynamic = ["version"]` and
-# hatchling reads this line at build time, so there is no second copy to
-# forget to bump.
+# Single source of truth: pyproject declares `dynamic = ["version"]`, so
+# hatchling reads this line at build time.
 __version__ = "1.3.0"
 
 
 class Orientation(IntEnum):
-    """Panel orientation, expressed as the byte the SET command sends.
+    """Panel orientation; the member value *is* the byte SET sends.
 
     LANDSCAPE is the 1920x462 layout the panel is sold as; PORTRAIT
     turns the glass 90 degrees, so the caller sees 462x1920. Neither is
     the transfer's own orientation -- that is always the 462x1920
-    buffer, whichever way the glass is hung. The member value *is* the
-    wire byte, so there is no second copy to keep in step.
+    buffer.
 
-    Confirmed on real hardware: SET only sets which way up the device
-    draws its own power-on splash, and persists that (verified by
-    unplugging and replugging after setting each value). It does not
-    rotate frames the host sends -- nothing on the device does, which is
-    why show() rotates them here.
+    Confirmed on real hardware (verified across replugs): SET only sets
+    which way up the device draws its own power-on splash, and persists
+    that. Nothing on the device rotates host frames, which is why show()
+    rotates them here.
     """
 
     LANDSCAPE = 0x00
@@ -64,9 +58,9 @@ class Orientation(IntEnum):
 
 
 # The single net rotation show() applies, per (orientation, inverted).
-# One entry per case, so the "inverted" mount is a rotation and not the
-# reflection a flip-then-rotate composes to: a reflection reverses
-# chirality, and text on the panel would read backwards.
+# One entry per case, so an inverted mount stays a rotation rather than
+# the reflection flip-then-rotate composes to -- text would read
+# backwards.
 _TRANSPOSE: dict[tuple[Orientation, bool], Image.Transpose | None] = {
     (Orientation.LANDSCAPE, False): Image.Transpose.ROTATE_270,
     (Orientation.LANDSCAPE, True): Image.Transpose.ROTATE_90,
@@ -94,8 +88,8 @@ class _HidDevice(Protocol):
     """The subset of hidapi's hid.device interface this library uses.
 
     Structural (Protocol) rather than nominal because hidapi ships no
-    type stubs; anything with these five methods works, which is also
-    the contract a test double passed as AKP02(dev=...) must satisfy.
+    type stubs. Also the contract a test double passed as
+    AKP02(dev=...) must satisfy.
     """
 
     def write(self, data: bytes) -> int: ...
@@ -128,16 +122,11 @@ class AKP02:
     own never starts a thread.
     """
 
-    # Every attribute an instance may have. Without this, the class
-    # accepts any assignment, so a misspelled `panel.inverted` binds a
-    # dead attribute in silence and the panel goes on doing the default
-    # thing -- the failure being a frame that looks wrong, with nothing
-    # pointing at the line that caused it. `inverted` is the one settable
-    # knob with no method behind it, so that is exactly where the mistake
-    # lands.
-    #
-    # Subclasses are unaffected: one without its own __slots__ still gets
-    # a __dict__ and stays open.
+    # Every attribute an instance may have. Mainly so a misspelled
+    # `panel.inverted` raises instead of silently binding a dead
+    # attribute and leaving a frame that just looks wrong; `inverted` is
+    # the one settable knob with no method behind it. Subclasses without
+    # their own __slots__ still get a __dict__ and stay open.
     __slots__ = (
         "_brightness",
         "_dev",
@@ -157,9 +146,8 @@ class AKP02:
     PRODUCT_ID = 0x3017
 
     # Named for the glass, not for an orientation: which one is "width"
-    # depends on the mode, but the strip is 1920 along its long edge
-    # however you hang it. The buffer sent is always SHORT x LONG.
-    # _screen_size() is what gives the caller's width and height.
+    # depends on the mode, but the buffer sent is always SHORT x LONG.
+    # _screen_size() gives the caller's width and height.
     PANEL_LONG_SIDE = 1920
     PANEL_SHORT_SIDE = 462
 
@@ -170,50 +158,42 @@ class AKP02:
     # Pillow advises <= 95; above it, size grows for almost no visual gain.
     JPEG_QUALITY_MAX = 95
     # Chroma subsampling. -1 leaves the choice to libjpeg, which picks
-    # 4:2:0 at these qualities, and is the default so the bytes this
-    # library sends do not change. 0 (4:4:4) is worth setting for small
+    # 4:2:0 at these qualities. 0 (4:4:4) is worth setting for small
     # colored text, which 4:2:0 visibly smears: measured on text-on-dark
     # content, roughly a third of the error for a third more bytes. Not
-    # confirmed against the panel's own JPEG decoder -- unlike most
-    # things here, so try it on hardware before relying on it.
-    # Pillow accepts out-of-range ints silently, hence the explicit set.
+    # confirmed against the panel's own JPEG decoder, so try it on
+    # hardware first. Pillow accepts out-of-range ints silently, hence
+    # the explicit set.
     JPEG_SUBSAMPLING = -1
     JPEG_SUBSAMPLING_VALUES = (-1, 0, 1, 2)  # -1 auto, 4:4:4, 4:2:2, 4:2:0
     BRIGHTNESS_MIN = 0  # range of the LIG command's parameter byte
     BRIGHTNESS_MAX = 100
     # The device's factory default: observed on real hardware to revert
-    # its backlight to this value after an off->on cycle, which is what
-    # screen_on() re-applies.
+    # its backlight to this after an off->on cycle, which is why
+    # screen_on() re-applies the caller's value.
     BRIGHTNESS_DEFAULT = 80
 
     # A region update sent immediately after a full-frame draw can stop
     # the full frame rendering at all (confirmed on real hardware: 4ms
-    # suffices, 0ms fails). Only this transition needs it --
-    # region-after-region and full-after-full do not. Likely cause: a
-    # full draw is a clean buffer replace, but a region is a
-    # read-modify-write against the framebuffer; if that read starts
-    # before the previous commit has finished settling internally (not
-    # just "USB bytes received"), the in-flight commit can get
-    # corrupted. 20ms here (5x the confirmed 4ms) for jitter margin; it
-    # fires once per full-frame draw, not per region, so being generous
-    # costs nothing.
+    # suffices, 0ms fails). Only this transition needs it. Likely cause:
+    # a full draw replaces the buffer, but a region is a
+    # read-modify-write, and reading before the previous commit has
+    # settled internally corrupts it. 20ms (5x the confirmed 4ms) for
+    # jitter margin; it fires once per full-frame draw, not per region,
+    # so being generous costs nothing.
     FULL_TO_REGION_SETTLE_SEC = 0.02
 
     # Confirmed on real hardware: a region update renders with the wrong
     # color unless whatever lands in the CRTDRA header's x field
-    # satisfies this residue mod this modulus. Root cause understood,
-    # not just observed: 462 does not divide evenly into 8- or 16-pixel
-    # JPEG blocks the way 1920 does, so the firmware evidently
-    # pads/rounds its buffer on that axis with a fixed internal offset.
-    # The 1920-pixel axis shows no equivalent sensitivity -- confirmed by
-    # testing it directly.
+    # satisfies this residue mod this modulus. 462 does not divide
+    # evenly into 8- or 16-pixel JPEG blocks the way 1920 does, so the
+    # firmware evidently pads that axis with a fixed internal offset;
+    # the 1920-pixel axis shows no equivalent sensitivity (tested).
     #
     # A property of the buffer, not of the caller's coordinates: the rule
     # binds whichever coordinate _to_buffer_rect maps into the header's
-    # x, which is y in landscape and x in portrait, running with or
-    # against it depending on `inverted`. show() corrects this
-    # automatically (see _align_axis); the constants exist so the target
-    # is explicit and updatable in one place.
+    # x -- y in landscape, x in portrait. show() corrects this
+    # automatically (see _align_axis).
     SHORT_AXIS_ALIGN_MODULUS = 8
     SHORT_AXIS_ALIGN_RESIDUE = 2
 
@@ -241,22 +221,16 @@ class AKP02:
         object, e.g. a test double) via dev to skip discovery.
         jpeg_quality (1-95) overrides the default encoding quality --
         small text UIs may want it higher. jpeg_subsampling picks the
-        chroma subsampling (JPEG_SUBSAMPLING_VALUES): 0 is 4:4:4, which
-        keeps small colored text sharp where the default smears it, for
-        about a third more bytes. Keyword-only and last in the signature
-        so no existing positional call shifts.
+        chroma subsampling (see JPEG_SUBSAMPLING).
 
         keepalive_interval is the interval in seconds __enter__ starts
         the keepalive thread with, or None to not start one. Only
-        recorded here -- no thread is started by __init__ (see
-        __enter__).
+        recorded here; __init__ starts no thread and sends nothing to
+        the device.
 
         The display mode starts at Orientation.LANDSCAPE; read or change
-        it with orientation(). Nothing is sent to the device here.
-
-        inverted (default False, set on the instance after construction)
-        turns the image a further 180 degrees, for a panel mounted the
-        other way up. Software only; no hardware command (see show()).
+        it with orientation(). Set `inverted` on the instance for a panel
+        mounted the other way up (software only; see show()).
 
         Raises DeviceNotFoundError if the panel isn't connected.
         """
@@ -287,28 +261,24 @@ class AKP02:
             self.JPEG_SUBSAMPLING if jpeg_subsampling is None else jpeg_subsampling
         )
         self._orientation: Orientation = Orientation.LANDSCAPE
-        # Tracks the last host-requested brightness so screen_on() can
-        # re-apply it (the device reverts to its default when the
-        # screen returns).
+        # Last host-requested brightness, for screen_on() to re-apply.
         self._brightness: int = self.BRIGHTNESS_DEFAULT
         # Extra 180-degree rotation for an inverted mount (see show()).
         self.inverted: bool = False
         self._dev: _HidDevice | None = dev if dev is not None else self._open()
         self._lock = threading.Lock()
-        # Guards _keepalive_thread/_keepalive_stop management only. Separate
-        # from _lock so stop_keepalive() never holds a lock the keepalive
-        # thread needs (heartbeat() takes _lock), which could deadlock under
-        # specific timing: join() while the thread is blocked in heartbeat().
+        # Guards _keepalive_thread/_keepalive_stop only. Separate from
+        # _lock so stop_keepalive() never holds a lock the keepalive
+        # thread needs (heartbeat() takes _lock): join() while the thread
+        # is blocked in heartbeat() would deadlock.
         self._keepalive_mgmt_lock = threading.Lock()
         self._keepalive_stop: threading.Event | None = None
         self._keepalive_thread: threading.Thread | None = None
         self._keepalive_interval: float | None = keepalive_interval
-        # Tracks whether the last show() was full-screen, to know when the
-        # settling delay is needed (see FULL_TO_REGION_SETTLE_SEC). Starts
-        # True: if the very first show() call ever made is a region update
-        # on a never-painted screen, there's no hardware evidence either
-        # way, so default to the safe (delay-inserting) assumption rather
-        # than risk the same failure mode with no data to justify skipping it.
+        # Whether the last show() was full-screen, to know when the
+        # settling delay is needed (see FULL_TO_REGION_SETTLE_SEC).
+        # Starts True: a region update on a never-painted screen has no
+        # evidence either way, so take the safe (delay-inserting) branch.
         self._last_show_was_full_screen = True
 
     @classmethod
@@ -351,14 +321,14 @@ class AKP02:
                 f"no HID device {cls.VENDOR_ID:04x}:{cls.PRODUCT_ID:04x} "
                 f"found; {detail}"
             )
-        # The AKP02 currently exposes a single HID interface; if a firmware
-        # revision ever adds more (as sibling Ajazz keypads do), prefer the
-        # lowest interface number for a deterministic choice.
+        # The AKP02 exposes a single HID interface today; if a firmware
+        # revision ever adds more (as sibling Ajazz keypads do), the
+        # lowest interface number keeps the choice deterministic.
         chosen = min(matches, key=lambda d: d.get("interface_number", 0))
         dev = hid.device()
         dev.open_path(chosen["path"])
-        # hidapi is untyped; this is the one point where its object enters
-        # our typed world, asserted to match the _HidDevice surface.
+        # hidapi is untyped: the one point where its object enters our
+        # typed world, asserted to match the _HidDevice surface.
         return cast(_HidDevice, dev)
 
     # -- context manager / lifecycle --
@@ -366,8 +336,9 @@ class AKP02:
     def __enter__(self) -> Self:
         """Start the keepalive (unless disabled) and return self.
 
-        The device sleeps without heartbeats, so this calls the public
-        start_keepalive() for you; AKP02(keepalive_interval=None) opts out.
+        The device sleeps without heartbeats, so this calls
+        start_keepalive() for you; AKP02(keepalive_interval=None) opts
+        out.
 
         Here rather than in __init__ because the keepalive closure holds
         a strong reference to self (an auto-started panel never closed
@@ -378,7 +349,7 @@ class AKP02:
 
         No SET is sent here: the splash orientation is persisted device
         state, so pushing this instance's default at every `with` would
-        overwrite a setting the caller never mentioned. It is
+        overwrite a setting the caller never mentioned. That is
         orientation()'s to send, once.
         """
         if self._keepalive_interval is not None:
@@ -393,21 +364,18 @@ class AKP02:
         """Stop the keepalive thread and close the device.
 
         The keepalive is stopped first, then _lock is taken before
-        touching the handle, so the close can't land mid-transfer: any
+        touching the handle, so the close can't land mid-transfer: a
         thread already inside show() finishes its header + chunks +
-        commit first, and any call that starts afterwards sees a closed
-        device and raises RuntimeError. Closing under an active writer
-        would be worse than a logic error -- libhidapi frees the handle,
-        so an in-flight write() in another thread is a use-after-free.
+        commit, and any later call sees a closed device and raises
+        RuntimeError. libhidapi frees the handle, so closing under an
+        active writer would be a use-after-free, not just a logic error.
 
-        The lock acquisition is bounded by timeout_sec for the same
-        reason stop_keepalive's join is: a write wedged against a
-        hung device must not hang the caller forever. The two waits are
-        sequential, so a fully wedged device can take up to twice
-        timeout_sec to return. On timeout the
-        handle is deliberately LEAKED rather than closed, since the
-        blocked writer may still be holding it; leaking a file
-        descriptor is the cheaper of the two failures.
+        The lock acquisition is bounded by timeout_sec so a write wedged
+        against a hung device can't hang the caller forever; the two
+        waits are sequential, so a fully wedged device can take up to
+        twice timeout_sec. On timeout the handle is deliberately LEAKED,
+        since the blocked writer may still hold it -- a leaked file
+        descriptor is the cheaper failure.
 
         Safe to call more than once.
         """
@@ -436,15 +404,15 @@ class AKP02:
         A 0x00 report-ID placeholder byte is prepended for hidapi's
         write(); the kernel strips it before the wire.
 
-        hidapi signals failure by returning -1 instead of raising, so the
-        return value is checked here; otherwise a mid-frame failure (e.g.
-        the device being unplugged) would silently drop reports.
+        hidapi signals failure by returning -1 rather than raising, so
+        the return value is checked here; otherwise a mid-frame unplug
+        would silently drop reports.
         """
         if self._dev is None:
             raise RuntimeError("device is closed")
         if len(data) > self.HID_REPORT_SIZE:
-            # Otherwise reaches bytes() with a negative count below and
-            # fails as an unexplained "negative count".
+            # Otherwise bytes() below gets a negative count and fails
+            # with nothing pointing at the cause.
             raise ValueError(
                 f"report of {len(data)} bytes exceeds HID_REPORT_SIZE "
                 f"({self.HID_REPORT_SIZE}); callers must chunk"
@@ -497,14 +465,11 @@ class AKP02:
     def screen_on(self) -> None:
         """Turn the display panel on ("DIS").
 
-        Re-applies the brightness last set via set_brightness() right
-        after DIS, under the same lock hold. The device reverts its
-        backlight to its factory default (BRIGHTNESS_DEFAULT) when the
-        screen returns, so without the re-apply an off/on cycle would
-        leave it bright regardless of what the caller asked for. The
-        LIG must follow DIS -- the reset is tied to the screen coming
-        on -- and keeping both in one lock hold stops the keepalive
-        thread or another caller from interleaving between them.
+        The device resets its backlight to BRIGHTNESS_DEFAULT when the
+        screen returns, so the brightness last set via set_brightness()
+        is re-applied. The LIG must follow DIS -- the reset is tied to
+        the screen coming on -- and both are sent under one lock hold so
+        nothing can interleave between them.
         """
         with self._lock:
             self._send_command(self.CMD_SCREEN_ON)
@@ -515,9 +480,7 @@ class AKP02:
 
         With no argument, returns the current brightness and touches
         nothing. With one, LIG is sent under the lock and the value is
-        remembered so screen_on() can re-apply it -- the device reverts
-        its backlight to BRIGHTNESS_DEFAULT when the screen returns, so
-        without this an off/on cycle would leave it bright again.
+        remembered for screen_on() to re-apply (see screen_on).
 
         Returns the current brightness in every case.
         """
@@ -543,9 +506,9 @@ class AKP02:
         With no argument, returns the current Orientation and touches
         nothing. With one, show() renders for it from the next call, and
         SET is sent under the lock so the device's splash matches -- that
-        is the command's only effect (see the Orientation docstring).
-        Wire layout is "CRT" + 00,00 + "SET" + 00,00 + 0x00 + value, the
-        standard 2-byte-gap pattern (unlike CLE/VER's exceptions).
+        is the command's only effect (see Orientation). Wire layout is
+        the standard 2-byte-gap pattern: "CRT" + 00,00 + "SET" + 00,00 +
+        0x00 + value (unlike CLE/VER's exceptions).
 
         Set panel.inverted directly for an upside-down mount; it is
         software only, so it needs no method.
@@ -572,18 +535,17 @@ class AKP02:
 
         Handy as Image.new("RGB", panel.size), which stays right across
         an orientation() change. `inverted` does not affect it: a
-        180-degree turn does not change the surface's shape.
+        180-degree turn does not change the shape.
         """
         return self._screen_size()
 
     def clear(self) -> None:
         """Clear the screen ("CLE").
 
-        Layout exception: 3-byte gap plus a hardcoded 0xFF trailer (0xFF
-        means "all" in the sibling multi-key products' clear command),
-        unlike _send_command's 2-byte gap. Gap size is apparently not
-        universal across CRT-tagged commands -- verify per command rather
-        than assuming _send_command's layout.
+        Layout exception: a 3-byte gap plus a hardcoded 0xFF trailer
+        (0xFF means "all" in the sibling multi-key products' clear
+        command), not _send_command's 2-byte gap. Gap size is not
+        universal across CRT commands -- verify each one.
         """
         with self._lock:
             self._write_report(b"CRT" + bytes(2) + b"CLE" + bytes(3) + bytes([0xFF]))
@@ -592,11 +554,10 @@ class AKP02:
         """Query the firmware version ("VER"). Confirmed on real hardware.
 
         Layout exception: a leading 0x00 device-context byte precedes
-        "CRT" and there is no gap after the mnemonic. The response is
-        read with get_input_report(), which is a GET_REPORT request on
-        the control endpoint (not an interrupt read on the IN endpoint,
-        though the 512-byte size matches EP2 IN's wMaxPacketSize); its
-        first byte echoes the report ID.
+        "CRT" and there is no gap after the mnemonic. The response comes
+        from get_input_report(), a GET_REPORT on the control endpoint
+        (not an interrupt read, though the 512-byte size matches EP2
+        IN's wMaxPacketSize); its first byte echoes the report ID.
         """
         with self._lock:
             dev = self._dev
@@ -609,11 +570,10 @@ class AKP02:
     def serial_number(self) -> str:
         """Return the device's USB serial number (e.g. "C511D378553A").
 
-        Unlike firmware_version(), this isn't part of the custom "CRT"
-        command protocol at all -- it's the standard USB iSerial device
-        descriptor string, read via hidapi's own
-        get_serial_number_string(), the same value shown by `lsusb -v`.
-        No custom protocol involved, nothing to reverse-engineer here.
+        Unlike firmware_version(), no custom "CRT" protocol is involved:
+        this is the standard USB iSerial descriptor string read via
+        hidapi's get_serial_number_string(), the same value `lsusb -v`
+        shows.
         """
         with self._lock:
             dev = self._dev
@@ -626,9 +586,7 @@ class AKP02:
     def _screen_size(self, orientation: Orientation | None = None) -> tuple[int, int]:
         """(width, height) of the caller's space for an orientation.
 
-        Landscape is the 1920x462 the panel is sold as; portrait is the
-        same glass turned 90 degrees, so the caller sees 462x1920. The
-        JPEG sent is 462x1920 either way -- only the caller's view
+        The JPEG sent is 462x1920 either way -- only the caller's view
         changes.
         """
         # Not `orientation or self._orientation`: Orientation.LANDSCAPE
@@ -642,22 +600,21 @@ class AKP02:
         """Nudge `value` so the header's x field satisfies the color rule.
 
         `value` is the caller's coordinate on the 462-px axis;
-        `reflected` says whether it reaches the header against
-        (462 - value - extent) or with it. See SHORT_AXIS_ALIGN_* for
+        `reflected` says whether it reaches the header as
+        (462 - value - extent) or unchanged. See SHORT_AXIS_ALIGN_* for
         the rule.
 
         Prefers the smaller shift, falls back to the other direction if
-        the preferred one leaves the panel, ties to the smaller
-        coordinate. Warns on every correction, and warns and returns
-        unchanged if neither fits: an occasional color glitch beats
-        refusing to draw. stacklevel=4 on both: the only caller is
-        _region_rect, which show() calls, so that is the user's line.
+        that one leaves the panel, ties to the smaller coordinate. Warns
+        on every correction, and warns and returns unchanged if neither
+        fits: an occasional color glitch beats refusing to draw.
+        stacklevel=4 reaches the user's show() call via _region_rect.
 
         Confirmed on real hardware: a region spanning the whole axis
         (extent == PANEL_SHORT_SIDE, so it can only sit at 0) needs no
-        correction -- with no partial remainder there is nothing for the
-        device's edge-padding to misalign. Without the check the search
-        below would leave it alone anyway, but warn every time.
+        correction -- with no partial remainder there is nothing to
+        misalign. The search below would leave it alone anyway, but warn
+        every time.
         """
         if extent == self.PANEL_SHORT_SIDE:
             return value
@@ -703,8 +660,8 @@ class AKP02:
 
         Puts the rect through exactly the net rotation _TRANSPOSE applies
         to the pixels, so a region lands where the full frame would put
-        it. Changing one without the other leaves full frames looking
-        correct while silently misplacing every region.
+        it. Change one without the other and full frames still look
+        correct while every region is misplaced.
         """
         x, y, width, height = rect
         screen_w, screen_h = self._screen_size(orientation)
@@ -728,10 +685,9 @@ class AKP02:
         """Bounds-check, align, and map a caller-space region rect.
 
         Shared by show()'s two paths so cached bytes land in exactly the
-        rect their source image would have -- the same check, the same
-        _align_axis nudge, not merely equivalent ones. `size` is in the
-        caller's space (pre-rotation); the rect comes back in buffer
-        space, so landscape returns it with width and height swapped.
+        rect their source image would have. `size` is caller space
+        (pre-rotation); the rect comes back in buffer space, so landscape
+        returns it with width and height swapped.
         """
         x, y = at
         width, height = size
@@ -758,7 +714,7 @@ class AKP02:
         portrait is identity, and `inverted` is a 180 that leaves the
         mapping alone. Deriving rather than being told means the header
         cannot declare a size the bytes contradict. Image.open() stops
-        at the JPEG header: tens of microseconds, no pixel decoded.
+        at the JPEG header, so no pixel is decoded.
         """
         try:
             with Image.open(io.BytesIO(jpeg)) as probe:
@@ -802,16 +758,15 @@ class AKP02:
 
         Push the result with show(jpeg, at=...) as often as you like:
         the size comes from the bytes, so a cache entry is just
-        (jpeg, at). Unchanged pixels then cost no encode, and encoding
-        can run off the thread that owns the device, since nothing here
-        touches the handle or takes the lock. No full-screen
-        counterpart: show() already letterboxes and encodes that case.
+        (jpeg, at), and unchanged pixels cost no encode. Nothing here
+        touches the handle or takes the lock, so encoding can run off
+        the thread that owns the device. No full-screen counterpart:
+        show() already letterboxes and encodes that case.
 
         The bytes carry the rotation the CURRENT orientation and
-        `inverted` imply, so the caller must drop the cache when either
-        changes. show() derives the size from whatever it is handed, so
-        stale bytes are reinterpreted rather than rejected; pass size=
-        to have that caught.
+        `inverted` imply, so drop the cache when either changes. show()
+        derives the size from whatever it is handed, so stale bytes are
+        reinterpreted rather than rejected; pass size= to catch that.
         """
         img = image if image.mode == "RGB" else image.convert("RGB")
         transpose = _TRANSPOSE[(self._orientation, bool(self.inverted))]
@@ -830,7 +785,7 @@ class AKP02:
         """Fit or place, rotate, and encode a PIL image for show().
 
         Returns the JPEG and the buffer rect to send it with. Called
-        outside the lock, so the encode does not block the keepalive.
+        outside the lock, so the encode never blocks the keepalive.
         """
         if size is not None:
             raise ValueError("size= is for raw JPEG bytes; an image has its own")
@@ -858,7 +813,7 @@ class AKP02:
         """Place ready JPEG bytes for show(), returning them untouched.
 
         A region is sized from the JPEG's own header, with size= checked
-        against that when the caller supplied it.
+        against that if the caller supplied it.
         """
         if at is None:
             if size is not None:
@@ -891,36 +846,29 @@ class AKP02:
 
         at=None: full-screen, letterboxed if not exactly that size.
         at=(x, y): partial update there, sized by the image; the rest of
-        the screen is preserved. The device renders a region's color
-        wrong unless the value landing in the header's x field satisfies
-        a confirmed alignment requirement (see SHORT_AXIS_ALIGN_*); this
-        is corrected automatically, nudging by a few pixels along the
-        462-px axis -- y in landscape, x in portrait -- and warning when
-        it does. The other coordinate and the size never change.
+        the screen is preserved. Regions are nudged a few pixels along
+        the 462-px axis when the color-alignment rule requires it,
+        warning when they are (see SHORT_AXIS_ALIGN_*). The other
+        coordinate and the size never change.
 
-        size=(width, height) is optional and only cross-checks: a
+        size=(width, height) is optional and only cross-checks, since a
         region's dimensions are read from the JPEG's own header. Pass it
-        to assert the caller-space shape you expect, which is the one
-        thing deriving cannot do -- unrotated or stale bytes look just
-        like correct bytes for a different shape. Produce region bytes
-        with encode_region().
+        to assert the caller-space shape you expect -- the one thing
+        deriving cannot do, as unrotated or stale bytes look just like
+        correct bytes for a different shape. Produce region bytes with
+        encode_region().
 
-        PIL input is JPEG-encoded before the lock, so the keepalive
-        thread isn't blocked. It first gets the one net rotation its
-        mode calls for (_TRANSPOSE), and a region's rect goes through
-        the same rotation, so it lands where the full frame would put
-        it. Raw JPEG bytes are never transformed, which is why region
-        bytes must arrive already rotated. The lock then holds for the
-        whole header + chunks + commit sequence so no report can
-        interleave.
-
-        A region update sent immediately after a full-frame draw needs a
-        brief settling delay first, or the full frame can fail to render
-        at all -- see FULL_TO_REGION_SETTLE_SEC. This is tracked and
-        applied automatically; callers don't need to do anything.
+        PIL input is rotated (_TRANSPOSE) and JPEG-encoded before the
+        lock, so the keepalive isn't blocked; a region's rect goes
+        through the same rotation, so it lands where the full frame
+        would put it. Raw JPEG bytes are never transformed, which is why
+        region bytes must arrive already rotated. The lock then holds
+        for the whole header + chunks + commit so no report can
+        interleave, and the FULL_TO_REGION_SETTLE_SEC delay is applied
+        automatically where it is needed.
         """
         is_region = at is not None
-        # Snapshotted once: every geometry decision below has to come from
+        # Snapshotted once: every geometry decision below must come from
         # the same state, or a concurrent orientation() could rotate the
         # pixels one way and place their rect the other.
         orientation, inverted = self._orientation, bool(self.inverted)
@@ -945,8 +893,8 @@ class AKP02:
         """Reject an interval that would make the keepalive loop spin.
 
         The loop is `while not stop.wait(interval_sec)`, and wait()
-        returns immediately for 0 or less -- so a bad interval doesn't
-        fail loudly, it becomes a tight loop writing to the device.
+        returns immediately for 0 or less, so a bad interval would
+        become a tight loop writing to the device rather than an error.
         """
         if interval_sec <= 0:
             raise ValueError(
@@ -959,10 +907,9 @@ class AKP02:
         """Start a daemon thread sending a heartbeat every interval_sec.
 
         No-op if already running. Thread-safe: concurrent calls can't
-        spawn two threads. __enter__ calls this for you unless
-        AKP02(keepalive_interval=None) was passed; calling it directly is
-        still supported -- for a different interval, or to resume after a
-        disconnect (see the dead-thread note below).
+        spawn two threads. __enter__ calls this unless
+        AKP02(keepalive_interval=None) was passed; call it directly for
+        a different interval, or to resume after a disconnect.
 
         Raises ValueError for a non-positive interval_sec, before the
         no-op check, so a bad value is reported either way.
@@ -970,12 +917,10 @@ class AKP02:
         The guard tests is_alive() rather than "is not None" because a
         keepalive thread that lost the device exits on its own, leaving
         a dead Thread object behind; treating that as "already running"
-        would silently no-op every restart for the life of the object,
-        including a legitimate resume after the caller recovered the
-        device. A dead thread is dropped and replaced here instead of
-        clearing the state from inside loop() -- that would need the
-        thread to take _keepalive_mgmt_lock, which stop_keepalive holds
-        across its join(), and deadlock.
+        would no-op every restart for the life of the object, including
+        a legitimate resume. The dead thread is dropped here rather than
+        cleared from inside loop(), which would need the thread to take
+        _keepalive_mgmt_lock -- held by stop_keepalive across its join().
         """
         self._check_keepalive_interval(interval_sec)
         with self._keepalive_mgmt_lock:
@@ -987,8 +932,7 @@ class AKP02:
             def loop() -> None:
                 # The try wraps the whole loop rather than each beat: the
                 # handler ends the thread either way, so the two are
-                # equivalent here, and this keeps the hot path one level
-                # shallower.
+                # equivalent, and this keeps the hot path shallower.
                 try:
                     while not stop.wait(interval_sec):
                         self.heartbeat()
@@ -1005,7 +949,7 @@ class AKP02:
 
         The join is bounded by timeout_sec so a write blocked on a wedged
         device can't hang the caller forever; the thread is a daemon, so
-        a leaked one can't block interpreter exit either.
+        a leaked one can't block interpreter exit.
         """
         with self._keepalive_mgmt_lock:
             if self._keepalive_thread is None or self._keepalive_stop is None:
