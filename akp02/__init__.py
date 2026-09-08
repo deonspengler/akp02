@@ -183,19 +183,23 @@ class AKP02:
     # so being generous costs nothing.
     FULL_TO_REGION_SETTLE_SEC = 0.02
 
-    # Confirmed on real hardware: a region update renders with the wrong
-    # color unless whatever lands in the CRTDRA header's x field
-    # satisfies this residue mod this modulus. 462 does not divide
-    # evenly into 8- or 16-pixel JPEG blocks the way 1920 does, so the
-    # firmware evidently pads that axis with a fixed internal offset;
-    # the 1920-pixel axis shows no equivalent sensitivity (tested).
+    # The residue to nudge a region onto, measured on hardware across
+    # all eight. With e = (3 * header_x) mod 8, the device rotates the
+    # channels by e mod 3 and slides the region's CONTENTS -- not its
+    # rect -- by e // 3 pixels. Residues 0, 1 and 2 all give correct
+    # color; only 0 also has no slide. 2 was the previous target, and
+    # drew every corrected region 2px off with no outward sign.
+    #
+    # Callers choosing their own coordinates can skip the nudge
+    # entirely: in landscape that is y == (PANEL_SHORT_SIDE - height)
+    # mod 8, which depends on the height, so compute it, don't hardcode.
     #
     # A property of the buffer, not of the caller's coordinates: the rule
     # binds whichever coordinate _to_buffer_rect maps into the header's
     # x -- y in landscape, x in portrait. show() corrects this
     # automatically (see _align_axis).
     SHORT_AXIS_ALIGN_MODULUS = 8
-    SHORT_AXIS_ALIGN_RESIDUE = 2
+    SHORT_AXIS_ALIGN_RESIDUE = 0
 
     CMD_SCREEN_OFF = b"HAN"
     CMD_SCREEN_ON = b"DIS"
@@ -610,15 +614,9 @@ class AKP02:
         fits: an occasional color glitch beats refusing to draw.
         stacklevel=4 reaches the user's show() call via _region_rect.
 
-        Confirmed on real hardware: a region spanning the whole axis
-        (extent == PANEL_SHORT_SIDE, so it can only sit at 0) needs no
-        correction -- with no partial remainder there is nothing to
-        misalign. The search below would leave it alone anyway, but warn
-        every time.
+        A region spanning the whole axis can only sit at 0, which is the
+        target residue, so it needs no special case.
         """
-        if extent == self.PANEL_SHORT_SIDE:
-            return value
-
         header_x = (self.PANEL_SHORT_SIDE - value - extent) if reflected else value
         residue = header_x % self.SHORT_AXIS_ALIGN_MODULUS
         if residue == self.SHORT_AXIS_ALIGN_RESIDUE:
@@ -628,27 +626,22 @@ class AKP02:
         # `reflected` implies.
         sign = -1 if reflected else 1
         plus = (self.SHORT_AXIS_ALIGN_RESIDUE - residue) % self.SHORT_AXIS_ALIGN_MODULUS
-        for _shift, candidate in sorted(
-            (abs(s), value + sign * s)
-            for s in (plus, plus - self.SHORT_AXIS_ALIGN_MODULUS)
-        ):
-            if candidate >= 0 and candidate + extent <= self.PANEL_SHORT_SIDE:
-                warnings.warn(
-                    f"akp02: region {axis}={value} shifted to "
-                    f"{axis}={candidate} (extent={extent}) for correct color "
-                    f"rendering -- see AKP02."
-                    f"SHORT_AXIS_ALIGN_MODULUS/SHORT_AXIS_ALIGN_RESIDUE",
-                    stacklevel=4,
-                )
-                return candidate
-
+        candidate = next(
+            c
+            for _shift, c in sorted(
+                (abs(s), value + sign * s)
+                for s in (plus, plus - self.SHORT_AXIS_ALIGN_MODULUS)
+            )
+            if c >= 0 and c + extent <= self.PANEL_SHORT_SIDE
+        )
         warnings.warn(
-            f"akp02: region {axis}={value} (extent={extent}) cannot be "
-            f"shifted to a color-safe position without leaving the panel -- "
-            f"drawing uncorrected; this region's color may render incorrectly",
+            f"akp02: region {axis}={value} shifted to "
+            f"{axis}={candidate} (extent={extent}) for correct color "
+            f"rendering -- see AKP02."
+            f"SHORT_AXIS_ALIGN_MODULUS/SHORT_AXIS_ALIGN_RESIDUE",
             stacklevel=4,
         )
-        return value
+        return candidate
 
     def _to_buffer_rect(
         self,

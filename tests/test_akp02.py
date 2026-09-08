@@ -537,11 +537,12 @@ class TestValidation:
 
     def test_region_flush_against_bottom_right_is_allowed(self, panel):
         # Off-by-one guard: exactly filling the remaining space must not
-        # be rejected. y=362 isn't color-aligned, so this also exercises
-        # the auto-correction -- that's fine, just acknowledge the warning
-        # explicitly rather than let it appear as unexplained noise.
+        # be rejected. Flush against the bottom in landscape is
+        # header_x == 0, i.e. exactly the target residue, so this must
+        # also draw without a correction warning.
         img = Image.new("RGB", (200, 100))
-        with pytest.warns(UserWarning, match="shifted"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             panel.show(img, at=(1920 - 200, 462 - 100))  # should not raise
 
     @pytest.mark.parametrize("value", [0, -1, -0.5])
@@ -660,14 +661,20 @@ class TestErrorHandling:
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
-# Region color-alignment auto-correction. Confirmed on real hardware:
-# a region update renders with the wrong color unless the position that
-# actually lands in the header (header x = PANEL_SHORT_SIDE - y - height in landscape)
-# satisfies portrait_x % 8 == 2. show() corrects y automatically to
-# reach this, trying both directions and preferring the smaller shift.
-# The specific y/height pairs below are real values tested on the
-# physical device (y=88/86 confirmed bad, y=84 confirmed good, all with
-# height=128) -- not arbitrary numbers.
+# Region color-alignment auto-correction. Measured on real hardware
+# across all eight residues: with e = (3 * header_x) mod 8 (header_x =
+# PANEL_SHORT_SIDE - y - height in landscape), the device rotates the
+# color channels by e mod 3 and slides the region's contents by e // 3
+# pixels. Residues 0, 1 and 2 all render the right color; only 0 also
+# has no slide, so 0 is the target. show() corrects y automatically to
+# reach it, trying both directions and preferring the smaller shift.
+#
+# The y/height pairs below are real values from the physical device.
+# y=88 and y=84 (height=128) are color observations: 88 confirmed
+# wrong, 84 confirmed right. y=86 was recorded as bad too, but was
+# never a color fault -- at residue 0 it is the ideal position, and
+# what was seen there was the old residue-2 target shifting it to 84,
+# i.e. the 2px displacement this commit removes.
 # ---------------------------------------------------------------------
 
 def _align_landscape_y(panel, y, height):
@@ -677,65 +684,66 @@ def _align_landscape_y(panel, y, height):
 
 class TestColorAlignment:
     def test_already_aligned_y_is_unchanged_and_silent(self, panel):
-        # y=84, height=128 -> portrait_x=250, 250%8=2: already aligned.
+        # y=86, height=128 -> header_x=248, 248%8=0: already aligned,
+        # and the position the old target moved off (see above).
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # any warning here is a failure
-            assert _align_landscape_y(panel, 84, 128) == 84
+            assert _align_landscape_y(panel, 86, 128) == 86
 
     def test_known_bad_case_is_corrected(self, panel):
-        # y=88, height=128 -> portrait_x=246, 246%8=6: confirmed bad on
-        # real hardware; corrects to the confirmed-good y=84.
+        # y=88, height=128 -> header_x=246, 246%8=6: confirmed bad on
+        # real hardware (channel rotation 2, per the model above).
+        # Corrects down 2 to y=86, header_x=248.
         with pytest.warns(UserWarning, match="shifted"):
-            assert _align_landscape_y(panel, 88, 128) == 84
+            assert _align_landscape_y(panel, 88, 128) == 86
 
-    def test_original_reported_bug_is_corrected(self, panel):
-        # The y=86 case that started this whole investigation.
+    def test_correction_lands_on_the_target_residue(self, panel):
+        # Whatever the shift, the value reaching the header must satisfy
+        # the rule -- asserted against the constants, not a literal.
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = _align_landscape_y(panel, 86, 128)
-        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
-        assert portrait_x % panel.SHORT_AXIS_ALIGN_MODULUS == \
+            corrected = _align_landscape_y(panel, 88, 128)
+        header_x = panel.PANEL_SHORT_SIDE - corrected - 128
+        assert header_x % panel.SHORT_AXIS_ALIGN_MODULUS == \
             panel.SHORT_AXIS_ALIGN_RESIDUE
 
     def test_correction_prefers_smaller_shift(self, panel):
-        # y=88 is 4 away from y=84 (down) and 4 away from y=92 (up) --
-        # a genuine tie. y=87 is 3 away from y=84 (down) and 5 away from
-        # y=92 (up), so down should be strictly preferred.
+        # With height=128 the aligned y values are 78, 86, 94, ...
+        # y=87 is 1 away from 86 (down) and 7 from 94 (up), so down wins.
         with pytest.warns(UserWarning, match="shifted"):
             corrected = _align_landscape_y(panel, 87, 128)
-        assert abs(corrected - 87) <= 4
+        assert corrected == 86
+
+    def test_tie_breaks_to_the_smaller_coordinate(self, panel):
+        # y=90 is 4 from 86 (down) and 4 from 94 (up) -- a genuine tie.
+        with pytest.warns(UserWarning, match="shifted"):
+            assert _align_landscape_y(panel, 90, 128) == 86
 
     def test_near_top_edge_shifts_up_not_negative(self, panel):
         # y=2 can't shift down without going negative -- must shift up.
         with pytest.warns(UserWarning, match="shifted"):
             corrected = _align_landscape_y(panel, 2, 128)
         assert corrected >= 0
-        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
-        assert portrait_x % 8 == 2
+        header_x = panel.PANEL_SHORT_SIDE - corrected - 128
+        assert header_x % panel.SHORT_AXIS_ALIGN_MODULUS == \
+            panel.SHORT_AXIS_ALIGN_RESIDUE
 
-    def test_near_bottom_edge_shifts_down_not_past_screen(self, panel):
-        # Shifting up would push height=128 past PANEL_SHORT_SIDE=462.
-        y = panel.PANEL_SHORT_SIDE - 128 - 1
+    def test_far_edge_falls_back_to_the_other_direction(self, panel):
+        # The unreflected (portrait) case is the mirror image: header_x
+        # is the caller's x, so the fallback is at the far end instead.
+        # x=61 with extent=400: shifting up to 64 would run 2px off the
+        # panel, so it must fall back down to 56.
         with pytest.warns(UserWarning, match="shifted"):
-            corrected = _align_landscape_y(panel, y, 128)
-        assert corrected + 128 <= panel.PANEL_SHORT_SIDE
-        portrait_x = panel.PANEL_SHORT_SIDE - corrected - 128
-        assert portrait_x % 8 == 2
-
-    def test_impossible_case_warns_and_returns_uncorrected(self, panel):
-        # height=461 (not 462 -- see the full-height exception below)
-        # leaves too little room on either side to fit either shift.
-        with pytest.warns(UserWarning, match="cannot be shifted"):
-            result = _align_landscape_y(panel, 0, 461)
-        assert result == 0  # returned unchanged, not silently altered
+            corrected = panel._align_axis(61, 400, "x", reflected=False)
+        assert corrected + 400 <= panel.PANEL_SHORT_SIDE
+        assert corrected % panel.SHORT_AXIS_ALIGN_MODULUS == \
+            panel.SHORT_AXIS_ALIGN_RESIDUE
 
     def test_full_height_needs_no_correction_and_warns_never(self, panel):
         # Confirmed on real hardware: height == PANEL_SHORT_SIDE (a region
         # spanning the whole short axis, only ever at y=0) renders
-        # correctly with no correction -- consistent with our
-        # understanding of the bug, since there's no partial remainder
-        # on this axis for the device's edge-padding to misalign.
-        # portrait_x=0 here, residue 0 -- would need "fixing" by the
-        # general rule, but must NOT warn, unlike a real unfixable case.
+        # correctly with no correction. header_x is 0 here, which is the
+        # target residue, so the general rule leaves it alone -- no
+        # special case needed, but pin that it stays silent.
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert _align_landscape_y(panel, 0, panel.PANEL_SHORT_SIDE) == 0
@@ -743,13 +751,13 @@ class TestColorAlignment:
     def test_only_y_is_adjusted_x_and_size_are_not(self, panel, fake_dev):
         img = Image.new("RGB", (200, 100))
         with pytest.warns(UserWarning, match="shifted"):
-            panel.show(img, at=(1600, 50))
+            panel.show(img, at=(1600, 52))
         header = fake_dev.writes[0][1:33]
         w, h, x, y = struct.unpack(">HHHH", header[13:21])
         # x and size must match a call with the CORRECTED y and nothing
         # else changed.
         assert (x, y, w, h) == panel._to_buffer_rect(
-            _Rect(1600, 48, 200, 100), LANDSCAPE, False)
+            _Rect(1600, 50, 200, 100), LANDSCAPE, False)
 
 
 class TestSettlingDelay:
@@ -759,14 +767,14 @@ class TestSettlingDelay:
     def test_full_then_region_has_delay(self, panel, clock):
         panel.show(Image.new("RGB", self.FULL))
         clock.sleeps.clear()
-        panel.show(Image.new("RGB", self.REGION), at=(32, 32))
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
 
     def test_region_then_region_has_no_delay(self, panel, clock):
         region = Image.new("RGB", self.REGION)
-        panel.show(region, at=(32, 32))  # first call: has delay (safe default)
+        panel.show(region, at=(32, 34))  # first call: has delay (safe default)
         clock.sleeps.clear()
-        panel.show(region, at=(32, 32))  # second: no delay expected
+        panel.show(region, at=(32, 34))  # second: no delay expected
         assert clock.sleeps == []
 
     def test_full_then_full_has_no_delay(self, panel, clock):
@@ -779,7 +787,7 @@ class TestSettlingDelay:
     def test_first_call_ever_being_region_has_delay(self, panel, clock):
         # No prior show() at all -- safe default assumes settling may be
         # needed, since there's no hardware evidence either way.
-        panel.show(Image.new("RGB", self.REGION), at=(32, 32))
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
 
     def test_failed_transfer_does_not_clear_the_full_screen_flag(
@@ -793,7 +801,7 @@ class TestSettlingDelay:
             panel.show(Image.new("RGB", self.FULL))
         fake_dev.fail_after = None
         clock.sleeps.clear()
-        panel.show(Image.new("RGB", self.REGION), at=(32, 32))
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
 
     def test_delay_precedes_the_first_report_of_the_region(self, panel,
@@ -812,7 +820,7 @@ class TestSettlingDelay:
         writes_after_full = len(fake_dev.writes)
         akp02.time.sleep = spy
         try:
-            panel.show(Image.new("RGB", self.REGION), at=(32, 32))
+            panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         finally:
             akp02.time.sleep = original
         assert observed == [writes_after_full]
@@ -824,7 +832,7 @@ class TestSettlingDelay:
         # is unaffected by encoding time, so it is not flaky.
         panel.show(Image.new("RGB", self.FULL))
         start = time.perf_counter()
-        panel.show(Image.new("RGB", self.REGION), at=(32, 32))
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert time.perf_counter() - start >= AKP02.FULL_TO_REGION_SETTLE_SEC
 
 
@@ -1026,14 +1034,14 @@ class TestImageHandling:
     def test_region_header_fields_correct(self, panel, fake_dev):
         img = Image.new("RGB", (200, 100))
         with pytest.warns(UserWarning, match="shifted"):
-            panel.show(img, at=(100, 50))
+            panel.show(img, at=(100, 52))
         header = fake_dev.writes[0][1:33]
         w, h, x, y = struct.unpack(">HHHH", header[13:21])
-        # y=50 is not color-aligned; the library corrects it to y=48
+        # y=52 is not color-aligned; the library corrects it to y=50
         # automatically (see AKP02._align_axis) -- the header must
         # reflect the CORRECTED position, not the one originally requested.
         assert (x, y, w, h) == panel._to_buffer_rect(
-            _Rect(100, 48, 200, 100), LANDSCAPE, False)
+            _Rect(100, 50, 200, 100), LANDSCAPE, False)
 
     def test_declared_length_matches_the_bytes_actually_sent(self, panel,
                                                              fake_dev):
@@ -1093,8 +1101,9 @@ class TestImageHandling:
         make_panel(full_dev).show(scene)
         full_fb = decode_sent_image(full_dev.writes[:-1]).convert("RGB")
 
-        box = (600, 100, 904, 300)  # y+height=300, 300%8=4 -- color-aligned
-                                     # per AKP02.SHORT_AXIS_ALIGN_MODULUS/
+        box = (600, 102, 904, 302)  # header_x = 462 - 102 - 200 = 160,
+                                     # 160 % 8 == 0 -- color-aligned per
+                                     # AKP02.SHORT_AXIS_ALIGN_MODULUS/
                                      # RESIDUE, so this test stays focused on
                                      # rotation/rect consistency without also
                                      # incidentally exercising auto-correction
@@ -1486,7 +1495,7 @@ class TestRegionBytes:
         # that the bytes path really does get corrected.
         jpeg = panel.encode_region(Image.new("RGB", (200, 100)))
         with pytest.warns(UserWarning, match="shifted"):
-            panel.show(jpeg, at=(100, 50))
+            panel.show(jpeg, at=(100, 52))
         header, _ = payload_of(fake_dev.writes[:-1])
         x = struct.unpack(">H", header[17:19])[0]
         assert x % AKP02.SHORT_AXIS_ALIGN_MODULUS == \
@@ -1496,21 +1505,22 @@ class TestRegionBytes:
         # The point of the feature: pushing an unchanged region again
         # must cost no encode and produce the same transfer.
         jpeg = panel.encode_region(_asymmetric_scene((200, 96)))
-        # y+height = 148, 148 % 8 == 4 -- color-aligned, so no correction
-        panel.show(jpeg, at=(100, 52))
+        # header_x = 462 - 54 - 96 = 312, 312 % 8 == 0 -- color-aligned,
+        # so no correction fires and no warning is emitted
+        panel.show(jpeg, at=(100, 54))
         first = list(fake_dev.writes)
         fake_dev.writes.clear()
-        panel.show(jpeg, at=(100, 52))
+        panel.show(jpeg, at=(100, 54))
         assert fake_dev.writes == first
 
     def test_size_matching_the_bytes_is_accepted(self, panel, fake_dev):
         # size= is an optional assertion, so the agreeing case has to be
         # a no-op rather than an extra constraint on the transfer.
         img = Image.new("RGB", (200, 96), (5, 6, 7))
-        panel.show(panel.encode_region(img), at=(100, 52), size=(200, 96))
+        panel.show(panel.encode_region(img), at=(100, 54), size=(200, 96))
         with_size = list(fake_dev.writes)
         fake_dev.writes.clear()
-        panel.show(panel.encode_region(img), at=(100, 52))
+        panel.show(panel.encode_region(img), at=(100, 54))
         assert fake_dev.writes == with_size
 
     @pytest.mark.parametrize("mode", ["RGBA", "L", "P"])

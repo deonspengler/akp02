@@ -168,11 +168,17 @@ all -- this is tracked and applied automatically; callers don't need to
 do anything.
 
 Region placement is also corrected automatically: the device renders a
-region with the wrong color unless its position satisfies a specific,
-confirmed alignment rule (see Protocol notes below). `show()` nudges
-the position by a few pixels when needed and warns when it does, so
-`at=(x, y)` always renders correctly without the caller having to know
-about this.
+region with rotated color channels, or slides its contents by a pixel
+or two, unless its position satisfies a specific alignment rule (see
+Protocol notes below). `show()` nudges the position by up to 4 pixels
+when needed and warns when it does, so `at=(x, y)` always renders
+correctly without the caller having to know about this.
+
+To place a region exactly where you asked and skip the nudge, keep it
+on the 8-pixel lattice the rule describes: in landscape that is
+`y % 8 == (462 - height) % 8`, which moves with the height, so compute
+it rather than hardcoding a value; in upright portrait it is simply
+`x % 8 == 0`.
 
 ## Examples
 
@@ -273,18 +279,17 @@ portrait passes through unrotated, and `inverted` turns either a further
 180. Non-zero header coordinates draw a partial region in that buffer's
 space; content outside it is preserved.
 
-**Region color alignment** (confirmed empirically on real hardware): a
-region update renders with the wrong color -- not a placement shift --
-unless the value that actually lands in the header's x field satisfies
-`x % 8 == 2`. Which of your coordinates that is depends on the mode: in
-landscape it is `462 - y - height`, in portrait it is `x` directly, and
-`inverted` reverses each. Root cause understood, not just observed: 462
-(the axis this applies to) doesn't divide evenly into 8- or 16-pixel
-JPEG blocks the way 1920 (the other axis, which shows no equivalent
-sensitivity) does, so the device's firmware evidently pads its buffer
-on that axis with a fixed internal offset. The library corrects this
-automatically rather than requiring callers to pick special
-coordinates.
+**Region color alignment** (measured on real hardware across all eight
+residues): the value that lands in the header's x field decides how the
+device renders the region. With `e = (3 * header_x) % 8`, it rotates the
+color channels by `e % 3` and slides the region's *contents* -- not its
+rect -- by `e // 3` pixels. Residues 0, 1 and 2 all give correct color;
+only 0 also has no slide, so 0 is the target. Which of your coordinates
+reaches that field depends on the mode: in landscape it is
+`462 - y - height`, in portrait it is `x` directly, and `inverted`
+reverses each. The 1920 axis shows no equivalent sensitivity. The
+library corrects this automatically rather than requiring callers to
+pick special coordinates.
 
 **Settling delay**: a region update sent immediately after a
 full-frame draw can fail to render the full frame at all unless a
