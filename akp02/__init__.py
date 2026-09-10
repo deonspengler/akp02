@@ -140,7 +140,6 @@ class AKP02:
         "_keepalive_stop",
         "_keepalive_thread",
         "_last_show_ended",
-        "_last_show_was_full_screen",
         "_lock",
         "_orientation",
         "inverted",
@@ -179,23 +178,22 @@ class AKP02:
     # screen_on() re-applies the caller's value.
     BRIGHTNESS_DEFAULT = 80
 
-    # A region update sent immediately after a full-frame draw can stop
-    # the full frame rendering at all (confirmed on real hardware: 4ms
-    # suffices, 0ms fails). Likely cause: a full draw replaces the
-    # buffer, but a region is a read-modify-write, and reading before
-    # the previous commit has settled corrupts it. 2.5x the confirmed
-    # 4ms.
-    FULL_TO_REGION_SETTLE_SEC = 0.01
-
-    # Region after region: the second update replaces the first before
-    # the device acts on it, so a burst can leave only the last one
-    # drawn -- and, where the rect latches separately from the data, one
-    # region's pixels at another's coordinates. Measured with a burst
-    # probe: 2.3ms fails, 2.4ms passes, and the threshold does not move
-    # with region size (24px and 128px behave alike), so it looks like a
-    # service tick rather than render time. Below it, which updates
-    # survive varies with the phase. 2x the measured edge.
-    REGION_TO_REGION_SETTLE_SEC = 0.005
+    # Settle time before a region update; a full frame needs none of its
+    # own. A full draw replaces the buffer outright, but a region is a
+    # read-modify-write, so it has to see the previous update land.
+    # Too soon after a full frame and the full frame can fail to render
+    # at all; too soon after another region and the second replaces the
+    # first before the device acts on it, so a burst leaves only the last
+    # one drawn -- and, where the rect latches separately from the data,
+    # one region's pixels at another's coordinates.
+    #
+    # Measured with a burst probe: after a region, 2.3ms fails and 2.4ms
+    # passes, and the threshold does not move with region size (24px and
+    # 128px behave alike), so it looks like a service tick rather than
+    # render time; below it, which updates survive varies with the phase.
+    # The same 5ms also holds after a full frame, which fits one tick
+    # governing both rather than two separate delays.
+    _REGION_SETTLE_SEC = 0.005
 
     # The residue to nudge a region onto, measured on hardware across
     # all eight. With e = (3 * header_x) mod 8, the device rotates the
@@ -293,11 +291,9 @@ class AKP02:
         self._keepalive_stop: threading.Event | None = None
         self._keepalive_thread: threading.Thread | None = None
         self._keepalive_interval: float | None = keepalive_interval
-        # Which settling delay the next region needs, and when the
-        # previous update finished so an already-paced caller is not made
-        # to wait twice. Both start pessimistic: a region update on a
-        # never-painted screen has no evidence either way.
-        self._last_show_was_full_screen = True
+        # When the previous update finished, so an already-paced caller
+        # is not made to wait twice. None until the first show(), which
+        # makes the first region wait the full settle time.
         self._last_show_ended: float | None = None
 
     @classmethod
@@ -872,8 +868,8 @@ class AKP02:
         would put it. Raw JPEG bytes are never transformed, which is why
         region bytes must arrive already rotated. The lock then holds
         for the whole header + chunks + commit so no report can
-        interleave, and whichever settling delay the device needs before
-        this update is waited out automatically.
+        interleave, and the settling delay a region needs before this
+        update is waited out automatically.
         """
         is_region = at is not None
         # Snapshotted once: every geometry decision below must come from
@@ -888,11 +884,7 @@ class AKP02:
         payload = self._crtdra_header(len(jpeg), rect) + jpeg
         with self._lock:
             if is_region:
-                wait = (
-                    self.FULL_TO_REGION_SETTLE_SEC
-                    if self._last_show_was_full_screen
-                    else self.REGION_TO_REGION_SETTLE_SEC
-                )
+                wait = self._REGION_SETTLE_SEC
                 # Measured from the end of the previous update, so a
                 # caller already spacing its own draws pays nothing.
                 if self._last_show_ended is not None:
@@ -903,7 +895,6 @@ class AKP02:
             for offset in range(0, len(payload), self.HID_REPORT_SIZE):
                 self._write_report(payload[offset : offset + self.HID_REPORT_SIZE])
             self._send_command(self.CMD_COMMIT)
-            self._last_show_was_full_screen = not is_region
             self._last_show_ended = time.monotonic()
 
     # -- keepalive --

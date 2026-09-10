@@ -110,9 +110,7 @@ message lists what was on the bus instead.
 
 The panel sleeps unless it receives periodic heartbeats, so entering the
 context manager starts a keepalive thread for you (every 5s by default).
-`AKP02(keepalive_interval=30)` changes the interval;
-`AKP02(keepalive_interval=None)` starts nothing, for one-shot use or if
-you'd rather drive it yourself:
+`AKP02(keepalive_interval=None)` starts nothing, for one-shot use:
 
 ```python
 panel.start_keepalive(interval_sec=10)  # or resume after a disconnect
@@ -166,10 +164,11 @@ Region updates need a brief settling delay before them, or the device
 drops them: one sent immediately after a full-frame draw can stop that
 frame rendering at all, and one sent immediately after another region
 replaces it before the device has drawn it -- send a burst back to back
-and only the last may survive. Both delays are tracked and applied
-automatically, measured from the end of the previous update, so a caller
-already spacing its own draws pays nothing and one that isn't is
-corrected. Callers don't need to do anything either way.
+and only the last may survive. The delay is tracked and applied
+automatically before every region, measured from the end of the
+previous update, so a caller already spacing its own draws pays nothing
+and one that isn't is corrected. Callers don't need to do anything
+either way.
 
 Region placement is also corrected automatically: the device renders a
 region with rotated color channels, or slides its contents by a pixel
@@ -222,7 +221,7 @@ The suite runs entirely against a fake HID device -- no physical
 hardware or `hidapi` installation required -- and holds the library at
 100% line and branch coverage. It covers protocol byte-exactness pinned
 against real captures, the region color-alignment correction with real
-hardware-confirmed data points, both settling delays including that an
+hardware-confirmed data points, the settling delay including that an
 already-waited caller is not made to wait twice, and concurrency
 behavior: dead-thread recovery after a disconnect, bounded shutdown
 against a wedged device, and lock-interleaving prevention verified
@@ -297,31 +296,28 @@ reverses each. The 1920 axis shows no equivalent sensitivity. The
 library corrects this automatically rather than requiring callers to
 pick special coordinates.
 
-**Settling delays**: a region update needs a gap before it. Two
-separate cases, both measured on hardware; full-after-full needs
-nothing.
+**Settling delay**: a region update needs a gap before it, whatever the
+previous update was; full-after-full needs nothing. The library applies
+one settle time -- 5ms, measured from the end of the previous update --
+before every region.
 
-*After a full-frame draw*, a region can stop the full frame rendering at
-all (confirmed: 4ms suffices, 0ms fails; the library uses 10ms).
-Likely cause: a full-frame draw is a clean buffer replace, but a region
-draw is a read-modify-write against the current framebuffer; if that
-read starts before the previous commit has finished settling
-internally, the in-flight commit can be corrupted or aborted.
-
-*After another region*, the second update replaces the first before the
-device acts on it, so a burst of N regions can leave only the last one
-drawn -- and, where the rect latches separately from the data, one
+After a full-frame draw, a region can stop the full frame rendering at
+all; after another region, the second update replaces the first before
+the device acts on it, so a burst of N regions can leave only the last
+one drawn -- and, where the rect latches separately from the data, one
 region's pixels at another region's coordinates. Measured with a burst
 probe: 2.3ms fails, 2.4ms passes, and the threshold does not move with
 region size (24px and 128px blocks behave alike), which points at a
-periodic service tick rather than at render time. Below the threshold,
-which updates survive varies run to run with the phase. The library
-uses 5ms. Note that the 2.4ms figure comes from one host; if part of it
-is USB scheduling rather than the device, another machine could differ.
+periodic service tick rather than at render time; below it, which
+updates survive varies run to run with the phase. The same 5ms also
+holds after a full frame, which fits one tick governing both rather
+than two separate delays. Note that the 2.4ms figure comes from one
+host; if part of it is USB scheduling rather than the device, another
+machine could differ.
 
-Both are measured from the end of the previous update rather than slept
-blindly, so a caller drawing on its own clock -- a frame loop, say --
-pays nothing for a gap it has already left.
+Measured from the end of the previous update rather than slept blindly,
+so a caller drawing on its own clock -- a frame loop, say -- pays
+nothing for a gap it has already left.
 
 **Splash-screen orientation** (confirmed on real hardware):
 `"CRT" + 00,00 + "SET" + 00,00 + 0x00 + <orientation byte>`, where the

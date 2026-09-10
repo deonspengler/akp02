@@ -780,20 +780,16 @@ class TestSettlingDelay:
         panel.show(Image.new("RGB", self.FULL))
         clock.sleeps.clear()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
-        assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
+        assert clock.sleeps == [AKP02._REGION_SETTLE_SEC]
 
-    def test_region_then_region_has_the_shorter_delay(self, panel, clock):
+    def test_region_then_region_has_the_same_delay(self, panel, clock):
+        # One settle time governs all region updates, whatever the
+        # previous update was.
         region = Image.new("RGB", self.REGION)
-        panel.show(region, at=(32, 34))  # first call: full-screen default
+        panel.show(region, at=(32, 34))
         clock.sleeps.clear()
         panel.show(region, at=(32, 34))
-        assert clock.sleeps == [AKP02.REGION_TO_REGION_SETTLE_SEC]
-
-    def test_the_two_delays_differ(self):
-        # Pin the relationship rather than the values: the full-frame
-        # case is the more damaging one and must not be the cheaper wait.
-        assert AKP02.REGION_TO_REGION_SETTLE_SEC < \
-            AKP02.FULL_TO_REGION_SETTLE_SEC
+        assert clock.sleeps == [AKP02._REGION_SETTLE_SEC]
 
     def test_a_caller_that_already_waited_does_not_wait_again(
             self, panel, clock):
@@ -801,7 +797,7 @@ class TestSettlingDelay:
         # it: a caller pacing its own updates should pay nothing.
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         clock.sleeps.clear()
-        clock.sleep(AKP02.REGION_TO_REGION_SETTLE_SEC)  # the caller's own wait
+        clock.sleep(AKP02._REGION_SETTLE_SEC)  # the caller's own wait
         clock.sleeps.clear()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == []
@@ -809,11 +805,11 @@ class TestSettlingDelay:
     def test_a_partial_wait_is_topped_up_not_repeated(self, panel, clock):
         panel.show(Image.new("RGB", self.FULL))
         clock.sleeps.clear()
-        already = AKP02.FULL_TO_REGION_SETTLE_SEC / 4
+        already = AKP02._REGION_SETTLE_SEC / 4
         clock.sleep(already)
         clock.sleeps.clear()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
-        assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC - already]
+        assert clock.sleeps == [AKP02._REGION_SETTLE_SEC - already]
 
     def test_full_then_full_has_no_delay(self, panel, clock):
         full = Image.new("RGB", self.FULL)
@@ -823,16 +819,17 @@ class TestSettlingDelay:
         assert clock.sleeps == []
 
     def test_first_call_ever_being_region_has_delay(self, panel, clock):
-        # No prior show() at all -- safe default assumes settling may be
-        # needed, since there's no hardware evidence either way.
+        # No prior show() at all -- _last_show_ended starts None, so
+        # nothing is deducted and the full settle time applies.
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
-        assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
+        assert clock.sleeps == [AKP02._REGION_SETTLE_SEC]
 
-    def test_failed_transfer_does_not_clear_the_full_screen_flag(
+    def test_failed_transfer_does_not_advance_the_last_show_marker(
             self, panel, fake_dev, clock):
-        # If a full-frame draw fails partway, the panel may still be
-        # showing a settling full frame, so the next region update must
-        # keep its delay rather than assume the state advanced.
+        # If a transfer fails partway the device never got the update,
+        # so the marker must still point at the last successful one:
+        # the next region waits the full settle time from that point,
+        # not a fraction of it from the failed attempt.
         panel.show(Image.new("RGB", self.FULL))
         fake_dev.fail_after = len(fake_dev.writes) + 2
         with pytest.raises(OSError):
@@ -840,7 +837,7 @@ class TestSettlingDelay:
         fake_dev.fail_after = None
         clock.sleeps.clear()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
-        assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
+        assert clock.sleeps == [AKP02._REGION_SETTLE_SEC]
 
     def test_delay_precedes_the_first_report_of_the_region(self, panel,
                                                            fake_dev, clock):
@@ -884,7 +881,7 @@ class TestSettlingDelay:
         start = time.monotonic()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         elapsed = time.monotonic() - start
-        assert elapsed >= AKP02.FULL_TO_REGION_SETTLE_SEC * 0.9
+        assert elapsed >= AKP02._REGION_SETTLE_SEC * 0.9
 
 
 # ---------------------------------------------------------------------
