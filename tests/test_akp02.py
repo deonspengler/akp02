@@ -150,13 +150,23 @@ class FakeClock:
     sleep instead tests the actual intent, exactly and instantly.
     Patched onto the akp02 module only, so the real clock is untouched
     everywhere else.
+
+    Monotonic is faked as well, advancing only when something sleeps.
+    The settling delay is measured from the end of the previous update,
+    so with a real clock the wait would be the constant minus however
+    long the test itself took -- never exactly the constant.
     """
 
     def __init__(self):
         self.sleeps = []
+        self._now = 0.0
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
+        self._now += seconds
+
+    def monotonic(self) -> float:
+        return self._now
 
     def __getattr__(self, name):  # perf_counter etc. pass through
         return getattr(time, name)
@@ -650,10 +660,12 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------
-# Settling delay: a region update sent immediately after a full-frame
-# draw needs a brief gap or the full frame can fail to render at all
-# (confirmed on real hardware). Region-after-region and full-after-full
-# both need no delay.
+# Settling delay. Two cases, both confirmed on real hardware: a region
+# update straight after a full-frame draw can stop the full frame
+# rendering at all, and a region update straight after another region
+# replaces it before the device has drawn it. Full-after-full needs
+# nothing. The wait is measured from the end of the previous update, so
+# a caller that already spaces its own draws is not made to wait twice.
 #
 # These assert on the sleep the library requests (via the `clock`
 # fixture) rather than on wall-clock elapsed time, which also includes
@@ -770,12 +782,38 @@ class TestSettlingDelay:
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
 
-    def test_region_then_region_has_no_delay(self, panel, clock):
+    def test_region_then_region_has_the_shorter_delay(self, panel, clock):
         region = Image.new("RGB", self.REGION)
-        panel.show(region, at=(32, 34))  # first call: has delay (safe default)
+        panel.show(region, at=(32, 34))  # first call: full-screen default
         clock.sleeps.clear()
-        panel.show(region, at=(32, 34))  # second: no delay expected
+        panel.show(region, at=(32, 34))
+        assert clock.sleeps == [AKP02.REGION_TO_REGION_SETTLE_SEC]
+
+    def test_the_two_delays_differ(self):
+        # Pin the relationship rather than the values: the full-frame
+        # case is the more damaging one and must not be the cheaper wait.
+        assert AKP02.REGION_TO_REGION_SETTLE_SEC < \
+            AKP02.FULL_TO_REGION_SETTLE_SEC
+
+    def test_a_caller_that_already_waited_does_not_wait_again(
+            self, panel, clock):
+        # The delay is time the device needs, not time the library owes
+        # it: a caller pacing its own updates should pay nothing.
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
+        clock.sleeps.clear()
+        clock.sleep(AKP02.REGION_TO_REGION_SETTLE_SEC)  # the caller's own wait
+        clock.sleeps.clear()
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
         assert clock.sleeps == []
+
+    def test_a_partial_wait_is_topped_up_not_repeated(self, panel, clock):
+        panel.show(Image.new("RGB", self.FULL))
+        clock.sleeps.clear()
+        already = AKP02.FULL_TO_REGION_SETTLE_SEC / 4
+        clock.sleep(already)
+        clock.sleeps.clear()
+        panel.show(Image.new("RGB", self.REGION), at=(32, 34))
+        assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC - already]
 
     def test_full_then_full_has_no_delay(self, panel, clock):
         full = Image.new("RGB", self.FULL)
@@ -805,7 +843,7 @@ class TestSettlingDelay:
         assert clock.sleeps == [AKP02.FULL_TO_REGION_SETTLE_SEC]
 
     def test_delay_precedes_the_first_report_of_the_region(self, panel,
-                                                           fake_dev):
+                                                           fake_dev, clock):
         # Ordering matters as much as duration: sleeping after the header
         # has already gone out would defeat the purpose. Recorded against
         # the real write stream rather than the clock.
@@ -828,12 +866,25 @@ class TestSettlingDelay:
     def test_delay_is_actually_awaited(self, panel):
         # One real-clock check that the delay is a genuine wait, so a
         # refactor that recorded the sleep without performing it could
-        # not slip past the clock-fixture tests above. The >= direction
-        # is unaffected by encoding time, so it is not flaky.
-        panel.show(Image.new("RGB", self.FULL))
-        start = time.perf_counter()
+        # not slip past the clock-fixture tests above.
+        #
+        # The first region of all is the case to time: with no previous
+        # update to measure from, nothing is deducted, so the whole wait
+        # falls inside this one call. Timing a later region would
+        # measure the constant minus however long the test itself took,
+        # which is not a fixed quantity.
+        #
+        # Monotonic, the clock the library uses -- perf_counter is a
+        # different source and the two drift. Allowed to come up a
+        # little short because sleep can return tens of microseconds
+        # early, and with encoding now done before the wait there is no
+        # work left after it to absorb that. What is being defended is
+        # that the wait happens at all: a version that only recorded it
+        # would land near zero, nowhere near this bound.
+        start = time.monotonic()
         panel.show(Image.new("RGB", self.REGION), at=(32, 34))
-        assert time.perf_counter() - start >= AKP02.FULL_TO_REGION_SETTLE_SEC
+        elapsed = time.monotonic() - start
+        assert elapsed >= AKP02.FULL_TO_REGION_SETTLE_SEC * 0.9
 
 
 # ---------------------------------------------------------------------
