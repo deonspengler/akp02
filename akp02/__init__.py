@@ -191,9 +191,9 @@ class AKP02:
     # passes, and the threshold does not move with region size (24px and
     # 128px behave alike), so it looks like a service tick rather than
     # render time; below it, which updates survive varies with the phase.
-    # The same 5ms also holds after a full frame, which fits one tick
+    # The same 10ms also holds after a full frame, which fits one tick
     # governing both rather than two separate delays.
-    _REGION_SETTLE_SEC = 0.005
+    _REGION_SETTLE_SEC = 0.01
 
     # The residue to nudge a region onto, measured on hardware across
     # all eight. With e = (3 * header_x) mod 8, the device rotates the

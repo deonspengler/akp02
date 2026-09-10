@@ -298,7 +298,7 @@ pick special coordinates.
 
 **Settling delay**: a region update needs a gap before it, whatever the
 previous update was; full-after-full needs nothing. The library applies
-one settle time -- 5ms, measured from the end of the previous update --
+one settle time -- 10ms, measured from the end of the previous update --
 before every region.
 
 After a full-frame draw, a region can stop the full frame rendering at
@@ -309,7 +309,7 @@ region's pixels at another region's coordinates. Measured with a burst
 probe: 2.3ms fails, 2.4ms passes, and the threshold does not move with
 region size (24px and 128px blocks behave alike), which points at a
 periodic service tick rather than at render time; below it, which
-updates survive varies run to run with the phase. The same 5ms also
+updates survive varies run to run with the phase. The same 10ms also
 holds after a full frame, which fits one tick governing both rather
 than two separate delays. Note that the 2.4ms figure comes from one
 host; if part of it is USB scheduling rather than the device, another
